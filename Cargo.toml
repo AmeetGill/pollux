@@ -10,7 +10,8 @@ tokio = { version = "1", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 httparse = "1.5.1"
+http = "0.2.4"
+httpdate = "1.0.1"
 bytes = "1"
-hyper = { version = "0.14", features = ["full"] }
 log4rs = "1.0.0"
 log = "0.4"
