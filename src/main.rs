@@ -1,15 +1,30 @@
-use tokio::net::{TcpListener, TcpStream};
 use std::net::SocketAddr;
-use tokio::io::{ AsyncWriteExt};
+use log::{info, LevelFilter};
+use log4rs::Config;
+use log4rs;
 use log4rs::append::console::ConsoleAppender;
 use log4rs::config::{Appender, Root};
-use log4rs::{Config};
-use log::{info, LevelFilter};
-use log4rs;
-use log4rs::encode::pattern::{PatternEncoder};
+use log4rs::encode::pattern::PatternEncoder;
+use tokio::io::AsyncWriteExt;
+use tokio::net::{TcpListener, TcpStream};
+
 use http::{Request, StatusCode};
 
-mod httphandler;
+extern crate crypto;
+extern crate base64;
+
+mod http_handler;
+mod error;
+
+//           ws-URI = "ws:" "//" host [ ":" port ] path [ "?" query ]
+//           wss-URI = "wss:" "//" host [ ":" port ] path [ "?" query ]
+//
+//           host = <host, defined in [RFC3986], Section 3.2.2>
+//           port = <port, defined in [RFC3986], Section 3.2.3>
+//           path = <path-abempty, defined in [RFC3986], Section 3.3>
+//           query = <query, defined in [RFC3986], Section 3.4>
+//            The port component is OPTIONAL; the default for "ws" is port 80,
+//           while the default for "wss" is port 443.
 
 #[tokio::main]
 async fn main() {
@@ -42,13 +57,15 @@ async fn main() {
 async fn process(socket: TcpStream, _ip: SocketAddr)  {
 
     let ( mut read_half, mut write_half) = socket.into_split();
-    let mut http_resp = httphandler::get_websocket_http_response(StatusCode::OK);
-    info!("Response: {:?}",http_resp);
-    let http_resp_bytes = httphandler::get_http_response_bytes(&mut http_resp);
-    info!("Response: {:?}",http_resp_bytes);
 
-    let bytes = httphandler::read_bytes_from_socket(&mut read_half).await.unwrap();
-    let http_request: Request<()> = httphandler::parse_http_request_bytes(&bytes).unwrap();
+    let bytes = http_handler::read_bytes_from_socket(&mut read_half).await.unwrap();
+    let http_request: Request<()> = http_handler::parse_http_request_bytes(&bytes).unwrap();
+    http_handler::check_websocket_headers(&http_request,"chat");
+
+    let mut http_resp = http_handler::get_websocket_http_response(StatusCode::OK);
+    info!("Response: {:?}",http_resp);
+    let http_resp_bytes = http_handler::get_http_response_bytes(&mut http_resp);
+    info!("Response: {:?}",http_resp_bytes);
 
     info!("Output received from client: {:?}",http_request);
 

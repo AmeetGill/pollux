@@ -1,14 +1,30 @@
 use tokio::net::tcp::OwnedReadHalf;
 use std::cmp::min;
-use http::{Request, Uri, Method, Version, Response, StatusCode};
+use http::{Request, Uri, Method, Version, Response, StatusCode, HeaderMap};
 use httparse::{EMPTY_HEADER, Status};
 use std::str::FromStr;
-use http::header::{HeaderName, HeaderValue, SERVER, DATE};
+use http::header::{HeaderName, HeaderValue, SERVER, DATE, SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_ACCEPT, UPGRADE, CONNECTION, SEC_WEBSOCKET_PROTOCOL};
 use tokio::io::AsyncReadExt;
 use httpdate::fmt_http_date;
 use std::time::SystemTime;
+use crypto::digest::Digest;
 
 static SERVER_NAME: &str = "Cluster23";
+
+
+//  The client can request that the server use a specific subprotocol by
+//    including the |Sec-WebSocket-Protocol| field in its handshake.  If it
+//    is specified, the server needs to include the same field and one of
+//    the selected subprotocol values in its response for the connection to
+//    be established.
+//
+// These subprotocol names should be registered as per Section 11.5.  To
+// avoid potential collisions, it is recommended to use names that
+// contain the ASCII version of the domain name of the subprotocol's
+// originator
+static SUB_PROTOCOL_SUPPORTED: [&str; 1] = ["v1.chat.cluster23.com"];
+
+static GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 pub fn get_websocket_http_response(status_code: StatusCode) -> Response<()> {
     Response::builder()
@@ -46,6 +62,54 @@ pub fn get_http_response_bytes(response: &mut Response<()>) -> Vec<u8> {
     }
     crate::info!("Response generated: {}",std::str::from_utf8(&response_bytes).unwrap());
     response_bytes
+}
+
+pub fn check_websocket_headers<'a>(request: &'a Request<()> , ws_protocol_selected: &'a str) -> Result<HeaderMap,&'static str> {
+    let mut header_map: HeaderMap = HeaderMap::new();
+    let mut response_builder = Response::builder();
+
+    // The |Sec-WebSocket-Accept| header field indicates whether
+    //    the server is willing to accept the connection
+    let sec_ws_key = match request.headers().get(SEC_WEBSOCKET_KEY) {
+        None => return Err("Sec-WebSocket-Key not found"),
+        Some(sec_ws_key) => sec_ws_key.to_str().unwrap().trim()
+    };
+
+    let concat_key = format!("{}{}", sec_ws_key, GUID);
+    crate::info!("concat_key: {}",concat_key);
+
+    let mut sha1_hasher = crypto::sha1::Sha1::new();
+    sha1_hasher.input_str(sec_ws_key);
+    let mut encoded_arr = [1;20];
+    sha1_hasher.result(&mut encoded_arr);
+    crate::info!("Sha1 hash: {:?}",encoded_arr);
+    crate::info!("base64 hash: {}",base64::encode(encoded_arr));
+
+    let encoded_sha1 = base64::encode(encoded_arr);
+
+    // any status code other than 101 indicates that the WebSocket handshake
+    //    has not completed and that the semantics of HTTP still apply
+    //
+    //  HTTP/1.1 101 Switching Protocols
+    //         Upgrade: websocket
+    //         Connection: Upgrade
+    //         Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+    //         Sec-WebSocket-Protocol: chat
+    //
+    //    These fields are checked by the WebSocket client for scripted pages.
+    //    If the |Sec-WebSocket-Accept| value does not match the expected
+    //    value, if the header field is missing, or if the HTTP status code is
+    //    not 101, the connection will not be established, and WebSocket frames
+    //    will not be sent.
+    response_builder.status("HTTP/1.1 101 Switching Protocols");
+    header_map.append(UPGRADE,HeaderValue::from_static("websocket"));
+    header_map.append(CONNECTION,HeaderValue::from_static("Upgrade"));
+    header_map.append(SEC_WEBSOCKET_ACCEPT,HeaderValue::from_str(&*base64::encode(encoded_sha1.as_bytes())).unwrap());
+    header_map.append(SEC_WEBSOCKET_PROTOCOL,HeaderValue::from_str(ws_protocol_selected).unwrap());
+
+    // The server can also set cookie-related option fields to _set_
+    //    cookies, as described in [RFC6265].
+    Ok(header_map)
 }
 
 pub async fn read_bytes_from_socket(read_half: &mut OwnedReadHalf) -> Result<Vec<u8>, std::io::Error> {
