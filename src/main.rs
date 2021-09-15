@@ -15,6 +15,7 @@ extern crate base64;
 
 mod http_handler;
 mod error;
+mod buffer;
 
 //           ws-URI = "ws:" "//" host [ ":" port ] path [ "?" query ]
 //           wss-URI = "wss:" "//" host [ ":" port ] path [ "?" query ]

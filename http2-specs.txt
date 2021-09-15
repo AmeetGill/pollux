@@ -1,0 +1,38 @@
+A client that makes a request for an "http" URI without prior
+   knowledge about support for HTTP/2 on the next hop uses the HTTP
+   Upgrade mechanism (Section 6.7 of [RFC7230]).  The client does so by
+   making an HTTP/1.1 request that includes an Upgrade header field with
+   the "h2c" token.  Such an HTTP/1.1 request MUST include exactly one
+   HTTP2-Settings (Section 3.2.1) header field.A server MUST NOT upgrade the connection to HTTP/2 if this header
+  field is not present or if more than one is present.  A server MUST
+  NOT send this header field.
+
+   For example:
+
+     GET / HTTP/1.1
+     Host: server.example.com
+     Connection: Upgrade, HTTP2-Settings
+     Upgrade: h2c
+     HTTP2-Settings: <base64url encoding of HTTP/2 SETTINGS payload>
+
+Requests that contain a payload body MUST be sent in their entirety
+before the client can send HTTP/2 frames.  This means that a large
+request can block the use of the connection until it is completely sent.
+
+If concurrency of an initial request with subsequent requests is
+   important, an OPTIONS request can be used to perform the upgrade to
+   HTTP/2, at the cost of an additional round trip.
+
+
+A server MUST ignore an "h2" token in an Upgrade header field.
+   Presence of a token with "h2" implies HTTP/2 over TLS, which is
+   instead negotiated as described
+
+A request that upgrades from HTTP/1.1 to HTTP/2 MUST include exactly
+   one "HTTP2-Settings" header field.  The HTTP2-Settings header field
+   is a connection-specific header field that includes parameters that
+   govern the HTTP/2 connection, provided in anticipation of the server
+   accepting the request to upgrade.
+
+     HTTP2-Settings    = token68
+

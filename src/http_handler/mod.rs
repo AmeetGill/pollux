@@ -8,6 +8,7 @@ use tokio::io::AsyncReadExt;
 use httpdate::fmt_http_date;
 use std::time::SystemTime;
 use crypto::digest::Digest;
+use crate::buffer::buffer::Buffer;
 
 static SERVER_NAME: &str = "Cluster23";
 
@@ -37,31 +38,34 @@ pub fn get_websocket_http_response(status_code: StatusCode) -> Response<()> {
 }
 
 pub fn get_http_response_bytes(response: &mut Response<()>) -> Vec<u8> {
+
+    let mut buffer: Box<Buffer<u8>> = crate::buffer::buffer::Buffer::new_unbound();
     let header_map = response.headers();
-    let mut response_bytes = Vec::new();
 
     let crfl = "\r\n";
+    let crfl_bytes = crfl.as_bytes();
     let colon = ": ";
+    let colon_bytes = colon.as_bytes();
     let http_version: &str = "1.1";
 
     let status_code_line = format!("HTTP/{} {}",http_version, response.status().as_str());
-    let mut status_code_line_bytes = status_code_line.as_bytes().to_owned();
-
-    response_bytes.append(&mut status_code_line_bytes);
-    response_bytes.append(&mut crfl.as_bytes().to_owned());
+    let mut status_code_line_bytes = status_code_line.as_bytes();
+    buffer.append_u8_array(&status_code_line_bytes);
+    buffer.append_u8_array(crfl_bytes);
 
     for header_name in header_map.keys() {
         let header_value = header_map.get(header_name).unwrap();
-        let mut header_value_bytes = header_value.as_bytes().to_owned();
-        let mut header_name_bytes = header_name.as_str().as_bytes().to_owned();
+        let mut header_value_bytes = header_value.as_bytes();
+        let mut header_name_bytes = header_name.as_str().as_bytes();
 
-        response_bytes.append(&mut header_name_bytes);
-        response_bytes.append(&mut colon.as_bytes().to_owned());
-        response_bytes.append(&mut header_value_bytes);
-        response_bytes.append(&mut crfl.as_bytes().to_owned());
+        buffer.append_u8_array(header_name_bytes);
+        buffer.append_u8_array(crfl_bytes);
+        buffer.append_u8_array(header_value_bytes);
+        buffer.append_u8_array(crfl_bytes);
     }
-    crate::info!("Response generated: {}",std::str::from_utf8(&response_bytes).unwrap());
-    response_bytes
+    let arr_final = buffer.get_arr();
+    crate::info!("Response generated: {}",std::str::from_utf8(&arr_final).unwrap());
+    arr_final
 }
 
 pub fn check_websocket_headers<'a>(request: &'a Request<()> , ws_protocol_selected: &'a str) -> Result<HeaderMap,&'static str> {
