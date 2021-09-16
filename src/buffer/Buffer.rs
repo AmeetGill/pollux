@@ -1,5 +1,3 @@
-use tokio::io::AsyncWriteExt;
-
 pub const EMPTY_BYTE: u8 = 0;
 
 pub struct Buffer<T> {
@@ -40,8 +38,12 @@ impl Buffer<u8> {
         Ok(())
     }
 
+    pub fn can_array_be_appended(&self,array_size: usize) -> bool {
+        self.curr_pos + array_size == self.buffer_size
+    }
+
     pub fn append_u8_array(&mut self, u8_arr: &[u8]) -> Result<(),&'static str> {
-        if self.curr_pos + u8_arr.len() == self.buffer_size {
+        if self.can_array_be_appended(u8_arr.len()) {
             return Err("Not enough space in buffer");
         }
         for u8_byte in u8_arr {
@@ -51,7 +53,7 @@ impl Buffer<u8> {
     }
 
     pub fn append_vec8_array(&mut self, vec8_arr: &Vec<u8>) -> Result<(),&'static str> {
-        if self.curr_pos + vec8_arr.len() == self.buffer_size {
+        if self.can_array_be_appended(vec8_arr.len()) {
             return Err("Not enough space in buffer");
         }
         for u8_byte in vec8_arr {

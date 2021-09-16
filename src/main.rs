@@ -8,7 +8,7 @@ use log4rs::encode::pattern::PatternEncoder;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 
-use http::{Request, StatusCode};
+use http::{Request};
 
 extern crate crypto;
 extern crate base64;
@@ -61,16 +61,15 @@ async fn process(socket: TcpStream, _ip: SocketAddr)  {
 
     let bytes = http_handler::read_bytes_from_socket(&mut read_half).await.unwrap();
     let http_request: Request<()> = http_handler::parse_http_request_bytes(&bytes).unwrap();
-    http_handler::check_websocket_headers(&http_request,"chat");
 
-    let mut http_resp = http_handler::get_websocket_http_response(StatusCode::OK);
+    let mut http_resp = http_handler::create_websocket_response(&http_request).unwrap();
     info!("Response: {:?}",http_resp);
     let http_resp_bytes = http_handler::get_http_response_bytes(&mut http_resp);
     info!("Response: {:?}",http_resp_bytes);
 
     info!("Output received from client: {:?}",http_request);
 
-     match write_half.write(&*http_resp_bytes).await {
+     match write_half.write(&*http_resp_bytes.unwrap()).await {
          Ok(n) => info!("Data sent size: {}",n),
          Err(e) => info!("Enable to send Data : {}",e)
      };

@@ -3,15 +3,27 @@ use std::cmp::min;
 use http::{Request, Uri, Method, Version, Response, StatusCode, HeaderMap};
 use httparse::{EMPTY_HEADER, Status};
 use std::str::FromStr;
-use http::header::{HeaderName, HeaderValue, SERVER, DATE, SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_ACCEPT, UPGRADE, CONNECTION, SEC_WEBSOCKET_PROTOCOL};
-use tokio::io::AsyncReadExt;
+use http::header::{
+    HeaderName,
+    HeaderValue,
+    SERVER,
+    DATE,
+    SEC_WEBSOCKET_KEY,
+    SEC_WEBSOCKET_ACCEPT,
+    UPGRADE,
+    CONNECTION,
+    SEC_WEBSOCKET_PROTOCOL,
+    SEC_WEBSOCKET_VERSION,
+    ORIGIN,
+    HOST
+};
+use tokio::io::{AsyncReadExt};
 use httpdate::fmt_http_date;
 use std::time::SystemTime;
 use crypto::digest::Digest;
 use crate::buffer::buffer::Buffer;
 
 static SERVER_NAME: &str = "Cluster23";
-
 
 //  The client can request that the server use a specific subprotocol by
 //    including the |Sec-WebSocket-Protocol| field in its handshake.  If it
@@ -23,21 +35,24 @@ static SERVER_NAME: &str = "Cluster23";
 // avoid potential collisions, it is recommended to use names that
 // contain the ASCII version of the domain name of the subprotocol's
 // originator
-static SUB_PROTOCOL_SUPPORTED: [&str; 1] = ["v1.chat.cluster23.com"];
+static SUB_PROTOCOLS_SUPPORTED: [&str; 1] = ["v1.chat.cluster23.com"];
+static PATHS_ALLOWED: [&str; 1] = ["/chat"];
+static GET_METHOD: &str = "GET";
+static WEBSOCKET_HEADERS_REQUIRED: [HeaderName;3] = [
+    SEC_WEBSOCKET_KEY,
+    SEC_WEBSOCKET_PROTOCOL,
+    SEC_WEBSOCKET_VERSION
+];
+static HEADER_REQUIRED_MAP : [(HeaderName,&str);4] = [
+    (ORIGIN,"cluster23.com"),
+    (HOST,"server.cluster23.com"),
+    (CONNECTION,"Upgrade"),
+    (UPGRADE,"websocket")
+];
 
 static GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-pub fn get_websocket_http_response(status_code: StatusCode) -> Response<()> {
-    Response::builder()
-        .version(Version::HTTP_11)
-        .status(status_code)
-        .header(SERVER,HeaderValue::from_static(SERVER_NAME))
-        .header(DATE,fmt_http_date(SystemTime::now()))
-        .body(())
-        .unwrap()
-}
-
-pub fn get_http_response_bytes(response: &mut Response<()>) -> Vec<u8> {
+pub fn get_http_response_bytes(response: &mut Response<()>) -> Result<Vec<u8>,&'static str> {
 
     let mut buffer: Box<Buffer<u8>> = crate::buffer::buffer::Buffer::new_unbound();
     let header_map = response.headers();
@@ -49,35 +64,97 @@ pub fn get_http_response_bytes(response: &mut Response<()>) -> Vec<u8> {
     let http_version: &str = "1.1";
 
     let status_code_line = format!("HTTP/{} {}",http_version, response.status().as_str());
-    let mut status_code_line_bytes = status_code_line.as_bytes();
-    buffer.append_u8_array(&status_code_line_bytes);
-    buffer.append_u8_array(crfl_bytes);
+    let status_code_line_bytes = status_code_line.as_bytes();
+    buffer.append_u8_array(&status_code_line_bytes)?;
+    buffer.append_u8_array(crfl_bytes)?;
 
     for header_name in header_map.keys() {
         let header_value = header_map.get(header_name).unwrap();
-        let mut header_value_bytes = header_value.as_bytes();
-        let mut header_name_bytes = header_name.as_str().as_bytes();
+        let header_value_bytes = header_value.as_bytes();
+        let header_name_bytes = header_name.as_str().as_bytes();
 
-        buffer.append_u8_array(header_name_bytes);
-        buffer.append_u8_array(crfl_bytes);
-        buffer.append_u8_array(header_value_bytes);
-        buffer.append_u8_array(crfl_bytes);
+        buffer.append_u8_array(header_name_bytes)?;
+        buffer.append_u8_array(colon_bytes)?;
+        buffer.append_u8_array(header_value_bytes)?;
+        buffer.append_u8_array(crfl_bytes)?;
     }
     let arr_final = buffer.get_arr();
     crate::info!("Response generated: {}",std::str::from_utf8(&arr_final).unwrap());
-    arr_final
+    Ok(arr_final)
 }
 
-pub fn check_websocket_headers<'a>(request: &'a Request<()> , ws_protocol_selected: &'a str) -> Result<HeaderMap,&'static str> {
-    let mut header_map: HeaderMap = HeaderMap::new();
+fn select_sub_protocol(header_map: &HeaderMap) -> Result<&str,&'static str> {
+    let protocols_header = header_map.get(SEC_WEBSOCKET_PROTOCOL).unwrap();
+    let protocols_requested = protocols_header.to_str().unwrap().split(",");
+    let mut protocol_matched: &str = "";
+    for protocol_str in protocols_requested {
+        if SUB_PROTOCOLS_SUPPORTED.contains(&protocol_str.trim()) {
+            protocol_matched = protocol_str;
+        }
+    }
+    if protocol_matched.len() > 0 {
+        return Ok(protocol_matched);
+    }
+    return Err("Not supported protocol found");
+}
+
+fn header_value_matching(header_map: &HeaderMap, header_name: &HeaderName, header_value_expected: &str) -> bool {
+    match header_map.get(header_name) {
+        None => { return false}
+        Some(header_value) => {
+            if !header_value_expected.eq_ignore_ascii_case(header_value.to_str().unwrap()) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+pub fn can_be_upgraded_to_websocket(request: &Request<()> ) -> bool {
+    for path in PATHS_ALLOWED {
+        if !request.uri().to_string().eq_ignore_ascii_case(path) {
+            return false;
+        }
+    }
+
+    if !request.method().as_str().eq_ignore_ascii_case(GET_METHOD) {
+        return false;
+    }
+
+    let header_map = request.headers();
+
+    for header_req in WEBSOCKET_HEADERS_REQUIRED.iter() {
+        if !header_map.contains_key(header_req) {
+            return false;
+        }
+    }
+
+    match select_sub_protocol(header_map) {
+        Err(_) => {return false}
+        _ => {}
+    }
+
+    for header_required in HEADER_REQUIRED_MAP.iter() {
+        if !header_value_matching(
+            header_map,
+            &header_required.0,
+            header_required.1) {
+            return false;
+        }
+    }
+
+    true
+}
+
+pub fn create_websocket_response<'a>(request: &'a Request<()>) -> Result<Response<()>,&'static str> {
+    if !can_be_upgraded_to_websocket(request) {
+        return Err("Cannot be upgraded to websockets");
+    }
     let mut response_builder = Response::builder();
 
     // The |Sec-WebSocket-Accept| header field indicates whether
     //    the server is willing to accept the connection
-    let sec_ws_key = match request.headers().get(SEC_WEBSOCKET_KEY) {
-        None => return Err("Sec-WebSocket-Key not found"),
-        Some(sec_ws_key) => sec_ws_key.to_str().unwrap().trim()
-    };
+    let sec_ws_key = request.headers().get(SEC_WEBSOCKET_KEY).unwrap().to_str().unwrap();
 
     let concat_key = format!("{}{}", sec_ws_key, GUID);
     crate::info!("concat_key: {}",concat_key);
@@ -105,15 +182,17 @@ pub fn check_websocket_headers<'a>(request: &'a Request<()> , ws_protocol_select
     //    value, if the header field is missing, or if the HTTP status code is
     //    not 101, the connection will not be established, and WebSocket frames
     //    will not be sent.
-    response_builder.status("HTTP/1.1 101 Switching Protocols");
-    header_map.append(UPGRADE,HeaderValue::from_static("websocket"));
-    header_map.append(CONNECTION,HeaderValue::from_static("Upgrade"));
-    header_map.append(SEC_WEBSOCKET_ACCEPT,HeaderValue::from_str(&*base64::encode(encoded_sha1.as_bytes())).unwrap());
-    header_map.append(SEC_WEBSOCKET_PROTOCOL,HeaderValue::from_str(ws_protocol_selected).unwrap());
+    response_builder = response_builder.status(StatusCode::SWITCHING_PROTOCOLS)
+        .header(UPGRADE,HeaderValue::from_static("websocket"))
+        .header(CONNECTION,HeaderValue::from_static("upgrade"))
+        .header(SEC_WEBSOCKET_ACCEPT,HeaderValue::from_str(&*base64::encode(encoded_sha1.as_bytes())).unwrap())
+        .header(SEC_WEBSOCKET_PROTOCOL,HeaderValue::from_str(select_sub_protocol(request.headers()).unwrap()).unwrap())
+        .header(SERVER,HeaderValue::from_static(SERVER_NAME))
+        .header(DATE,fmt_http_date(SystemTime::now()));
 
     // The server can also set cookie-related option fields to _set_
     //    cookies, as described in [RFC6265].
-    Ok(header_map)
+    Ok(response_builder.body(()).unwrap())
 }
 
 pub async fn read_bytes_from_socket(read_half: &mut OwnedReadHalf) -> Result<Vec<u8>, std::io::Error> {
