@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use log::{info, LevelFilter};
+use log::{info, error, LevelFilter};
 use log4rs::Config;
 use log4rs;
 use log4rs::append::console::ConsoleAppender;
@@ -56,22 +56,20 @@ async fn main() {
 }
 
 async fn process(socket: TcpStream, _ip: SocketAddr)  {
-
+    info!("Processing TcpStream: Start");
     let ( mut read_half, mut write_half) = socket.into_split();
 
     let bytes = http_handler::read_bytes_from_socket(&mut read_half).await.unwrap();
     let http_request: Request<()> = http_handler::parse_http_request_bytes(&bytes).unwrap();
 
     let mut http_resp = http_handler::create_websocket_response(&http_request).unwrap();
-    info!("Response: {:?}",http_resp);
     let http_resp_bytes = http_handler::get_http_response_bytes(&mut http_resp);
-    info!("Response: {:?}",http_resp_bytes);
-
-    info!("Output received from client: {:?}",http_request);
 
      match write_half.write(&*http_resp_bytes.unwrap()).await {
          Ok(n) => info!("Data sent size: {}",n),
-         Err(e) => info!("Enable to send Data : {}",e)
+         Err(e) => error!("Enable to send Data : {}",e)
      };
+
+    info!("Processing TcpStream: End");
 
 }

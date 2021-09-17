@@ -22,6 +22,7 @@ use httpdate::fmt_http_date;
 use std::time::SystemTime;
 use crypto::digest::Digest;
 use crate::buffer::buffer::Buffer;
+use std::error::Error;
 
 static SERVER_NAME: &str = "Cluster23";
 
@@ -39,7 +40,7 @@ static SUB_PROTOCOLS_SUPPORTED: [&str; 1] = ["v1.chat.cluster23.com"];
 static PATHS_ALLOWED: [&str; 1] = ["/chat"];
 static GET_METHOD: &str = "GET";
 static WEBSOCKET_HEADERS_REQUIRED: [HeaderName;3] = [
-    SEC_WEBSOCKET_KEY,
+    SEC_WEBSOCKET_KEY, // 16 byte
     SEC_WEBSOCKET_PROTOCOL,
     SEC_WEBSOCKET_VERSION
 ];
@@ -79,7 +80,6 @@ pub fn get_http_response_bytes(response: &mut Response<()>) -> Result<Vec<u8>,&'
         buffer.append_u8_array(crfl_bytes)?;
     }
     let arr_final = buffer.get_arr();
-    crate::info!("Response generated: {}",std::str::from_utf8(&arr_final).unwrap());
     Ok(arr_final)
 }
 
@@ -99,10 +99,12 @@ fn select_sub_protocol(header_map: &HeaderMap) -> Result<&str,&'static str> {
 }
 
 fn header_value_matching(header_map: &HeaderMap, header_name: &HeaderName, header_value_expected: &str) -> bool {
+    crate::info!("Checking Header Values");
     match header_map.get(header_name) {
         None => { return false}
         Some(header_value) => {
             if !header_value_expected.eq_ignore_ascii_case(header_value.to_str().unwrap()) {
+                crate::error!("Expected value: {} for header: {} but found: {}",header_value_expected,header_name.as_str(),header_value.to_str().unwrap());
                 return false;
             }
         }
@@ -111,29 +113,47 @@ fn header_value_matching(header_map: &HeaderMap, header_name: &HeaderName, heade
 }
 
 pub fn can_be_upgraded_to_websocket(request: &Request<()> ) -> bool {
+    crate::info!("Checking Websocket handshake Request");
+    let mut path_matched = false;
+    crate::info!("Checking Path/Resource");
     for path in PATHS_ALLOWED {
-        if !request.uri().to_string().eq_ignore_ascii_case(path) {
-            return false;
+        if request.uri().to_string().eq_ignore_ascii_case(path) {
+            path_matched = true;
+            break;
         }
     }
 
+    if !path_matched {
+        crate::error!("Path requested: \"{}\" not found",request.uri().to_string());
+        return false
+    }
+
+    crate::info!("Checking HTTP Method");
     if !request.method().as_str().eq_ignore_ascii_case(GET_METHOD) {
+        crate::error!("HTTP method: \"{}\" not allowed",request.method().as_str());
         return false;
     }
 
     let header_map = request.headers();
 
+    crate::info!("Checking Websocket Headers");
     for header_req in WEBSOCKET_HEADERS_REQUIRED.iter() {
         if !header_map.contains_key(header_req) {
+            crate::error!("Header \"{}\" not found",header_req.as_str());
             return false;
         }
     }
 
+    crate::info!("Checking Websocket Sub protocol");
     match select_sub_protocol(header_map) {
-        Err(_) => {return false}
+        Err(_) => {
+            crate::error!("Sub Protocol not supported ");
+            return false
+        }
         _ => {}
     }
 
+    crate::info!("Checking HTTP headers");
     for header_required in HEADER_REQUIRED_MAP.iter() {
         if !header_value_matching(
             header_map,
@@ -147,7 +167,9 @@ pub fn can_be_upgraded_to_websocket(request: &Request<()> ) -> bool {
 }
 
 pub fn create_websocket_response<'a>(request: &'a Request<()>) -> Result<Response<()>,&'static str> {
+    crate::info!("Creating Websocket handshake response");
     if !can_be_upgraded_to_websocket(request) {
+        crate::error!("Handshake unsuccessful");
         return Err("Cannot be upgraded to websockets");
     }
     let mut response_builder = Response::builder();
@@ -155,6 +177,7 @@ pub fn create_websocket_response<'a>(request: &'a Request<()>) -> Result<Respons
     // The |Sec-WebSocket-Accept| header field indicates whether
     //    the server is willing to accept the connection
     let sec_ws_key = request.headers().get(SEC_WEBSOCKET_KEY).unwrap().to_str().unwrap();
+    crate::info!("Creating Websocket Key response");
 
     let concat_key = format!("{}{}", sec_ws_key, GUID);
     crate::info!("concat_key: {}",concat_key);
@@ -182,6 +205,7 @@ pub fn create_websocket_response<'a>(request: &'a Request<()>) -> Result<Respons
     //    value, if the header field is missing, or if the HTTP status code is
     //    not 101, the connection will not be established, and WebSocket frames
     //    will not be sent.
+    crate::info!("Setting Required HTTP headers");
     response_builder = response_builder.status(StatusCode::SWITCHING_PROTOCOLS)
         .header(UPGRADE,HeaderValue::from_static("websocket"))
         .header(CONNECTION,HeaderValue::from_static("upgrade"))
@@ -226,6 +250,7 @@ pub async fn read_bytes_from_socket(read_half: &mut OwnedReadHalf) -> Result<Vec
 }
 
 pub fn parse_http_request_bytes(bytes: &[u8]) -> Result<Request<()>,&'static str> {
+    crate::info!("Parsing HTTP request");
 
     let mut headers = [EMPTY_HEADER;10];
     let mut http_parser_req = httparse::Request::new(&mut headers);
@@ -233,24 +258,33 @@ pub fn parse_http_request_bytes(bytes: &[u8]) -> Result<Request<()>,&'static str
         Ok(status) => {
             match status {
                 Status::Complete(headers) => {
-                    crate::info!("Number of headers: {:?}",headers);
+                    crate::info!("Parsing complete");
                 }
-                Status::Partial => {}
+                Status::Partial => {
+                    crate::error!("Not able to completely parse request ");
+                    return Err("Partial parsed request");
+                }
             }
         }
-        Err(_) => {}
+        Err(e) => {
+            crate::error!("Error while parsing http request: {} ",e);
+            return Err("Error while parsing http request");
+        }
     };
 
 
     if http_parser_req.version.is_none() {
+        crate::error!("HTTP Version not found");
         return Err("Http Version not found");
     }
 
     if http_parser_req.method.is_none() {
+        crate::error!("Http method not found");
         return Err("Http method not found");
     }
 
     if http_parser_req.path.is_none() {
+        crate::error!("Http request Path not found");
         return Err("Http request Path not found");
     }
 
@@ -271,20 +305,26 @@ pub fn parse_http_request_bytes(bytes: &[u8]) -> Result<Request<()>,&'static str
         if !header.name.is_empty() {
             let header_name = match HeaderName::from_bytes(header.name.to_ascii_lowercase().as_bytes()) {
                 Ok(header_name) => header_name,
-                Err(_e) => return Err("InvalidHeaderName")
+                Err(e) => {
+                    crate::error!("Error occurred: {}",e);
+                    return Err("InvalidHeaderName")
+                }
             };
 
             let header_value = match HeaderValue::from_bytes(header.value) {
                 Ok(header_value) => header_value,
-                Err(_e) => return Err("InvalidHeaderValue")
+                Err(e) => {
+                    crate::error!("Error occurred: {}",e);
+                    return Err("InvalidHeaderValue")
+                }
             };
             http_request_builder = http_request_builder.header(header_name, header_value);
         }
     }
 
     let http_request = http_request_builder.body(()).unwrap();
-    let get_method = "get";
-    if !http_request.method().as_str().trim().eq_ignore_ascii_case(get_method) {
+    if !http_request.method().as_str().trim().eq_ignore_ascii_case(GET_METHOD) {
+        crate::error!("Http Method not support");
         return Err("Only HTTP GET method is allowed");
     }
 
