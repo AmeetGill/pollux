@@ -8,7 +8,7 @@ use log4rs::encode::pattern::PatternEncoder;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 
-use http::{Request};
+use http::{Request, Response};
 
 extern crate crypto;
 extern crate base64;
@@ -16,6 +16,7 @@ extern crate base64;
 mod http_handler;
 mod error;
 mod buffer;
+mod data_frame;
 
 //           ws-URI = "ws:" "//" host [ ":" port ] path [ "?" query ]
 //           wss-URI = "wss:" "//" host [ ":" port ] path [ "?" query ]
@@ -54,7 +55,9 @@ async fn main() {
         });
     }
 }
-
+// The server MUST close the connection upon receiving a
+//    frame that is not masked. In this case, a server MAY send a Close
+//    frame with a status code of 1002 (protocol error)
 async fn process(socket: TcpStream, _ip: SocketAddr)  {
     info!("Processing TcpStream: Start");
     let ( mut read_half, mut write_half) = socket.into_split();
@@ -62,7 +65,10 @@ async fn process(socket: TcpStream, _ip: SocketAddr)  {
     let bytes = http_handler::read_bytes_from_socket(&mut read_half).await.unwrap();
     let http_request: Request<()> = http_handler::parse_http_request_bytes(&bytes).unwrap();
 
-    let mut http_resp = http_handler::create_websocket_response(&http_request).unwrap();
+    let mut http_resp = http_handler::create_websocket_response(&http_request).unwrap_or_else(|error|{
+        return http_handler::create_401_response();
+    });
+
     let http_resp_bytes = http_handler::get_http_response_bytes(&mut http_resp);
 
      match write_half.write(&*http_resp_bytes.unwrap()).await {

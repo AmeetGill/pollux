@@ -39,16 +39,19 @@ static SERVER_NAME: &str = "Cluster23";
 static SUB_PROTOCOLS_SUPPORTED: [&str; 1] = ["v1.chat.cluster23.com"];
 static PATHS_ALLOWED: [&str; 1] = ["/chat"];
 static GET_METHOD: &str = "GET";
-static WEBSOCKET_HEADERS_REQUIRED: [HeaderName;3] = [
+static WEBSOCKET_HEADERS_REQUIRED: [HeaderName;4] = [
     SEC_WEBSOCKET_KEY, // 16 byte
     SEC_WEBSOCKET_PROTOCOL,
+    SEC_WEBSOCKET_VERSION,
     SEC_WEBSOCKET_VERSION
 ];
-static HEADER_REQUIRED_MAP : [(HeaderName,&str);4] = [
+static WEBSOCKET_VERSION_SUPPORTED: &str = "13";
+static HEADER_REQUIRED_MAP : [(HeaderName,&str);5] = [
     (ORIGIN,"cluster23.com"),
     (HOST,"server.cluster23.com"),
     (CONNECTION,"Upgrade"),
-    (UPGRADE,"websocket")
+    (UPGRADE,"websocket"),
+    (SEC_WEBSOCKET_VERSION,WEBSOCKET_VERSION_SUPPORTED)
 ];
 
 static GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -99,7 +102,7 @@ fn select_sub_protocol(header_map: &HeaderMap) -> Result<&str,&'static str> {
 }
 
 fn header_value_matching(header_map: &HeaderMap, header_name: &HeaderName, header_value_expected: &str) -> bool {
-    crate::info!("Checking Header Values");
+    crate::info!("Checking \"{}\" Header Value",header_name.as_str());
     match header_map.get(header_name) {
         None => { return false}
         Some(header_value) => {
@@ -169,7 +172,7 @@ pub fn can_be_upgraded_to_websocket(request: &Request<()> ) -> bool {
 pub fn create_websocket_response<'a>(request: &'a Request<()>) -> Result<Response<()>,&'static str> {
     crate::info!("Creating Websocket handshake response");
     if !can_be_upgraded_to_websocket(request) {
-        crate::error!("Handshake unsuccessful");
+        crate::error!("Request not appropriate to make Handshake unsuccessful");
         return Err("Cannot be upgraded to websockets");
     }
     let mut response_builder = Response::builder();
@@ -178,6 +181,11 @@ pub fn create_websocket_response<'a>(request: &'a Request<()>) -> Result<Respons
     //    the server is willing to accept the connection
     let sec_ws_key = request.headers().get(SEC_WEBSOCKET_KEY).unwrap().to_str().unwrap();
     crate::info!("Creating Websocket Key response");
+
+    if base64::decode(sec_ws_key).unwrap().len() != 16 {
+        crate::error!("SEC_KEY length should be 16 bytes");
+        return Err("SEC_KEY length should be 16 bytes");
+    }
 
     let concat_key = format!("{}{}", sec_ws_key, GUID);
     crate::info!("concat_key: {}",concat_key);
@@ -217,6 +225,14 @@ pub fn create_websocket_response<'a>(request: &'a Request<()>) -> Result<Respons
     // The server can also set cookie-related option fields to _set_
     //    cookies, as described in [RFC6265].
     Ok(response_builder.body(()).unwrap())
+}
+
+pub fn create_401_response() -> Response<()>{
+    Response::builder()
+        .header(SEC_WEBSOCKET_VERSION,HeaderValue::from_static("13"))
+        .status(StatusCode::BAD_REQUEST)
+        .body(())
+        .unwrap()
 }
 
 pub async fn read_bytes_from_socket(read_half: &mut OwnedReadHalf) -> Result<Vec<u8>, std::io::Error> {
