@@ -20,7 +20,7 @@ use http::header::{
 use tokio::io::{AsyncReadExt};
 use httpdate::fmt_http_date;
 use std::time::SystemTime;
-use crypto::digest::Digest;
+use sha1::{Sha1, Digest};
 use crate::buffer::buffer::Buffer;
 use std::error::Error;
 
@@ -39,16 +39,15 @@ static SERVER_NAME: &str = "Cluster23";
 static SUB_PROTOCOLS_SUPPORTED: [&str; 1] = ["v1.chat.cluster23.com"];
 static PATHS_ALLOWED: [&str; 1] = ["/chat"];
 static GET_METHOD: &str = "GET";
-static WEBSOCKET_HEADERS_REQUIRED: [HeaderName;4] = [
+static WEBSOCKET_HEADERS_REQUIRED: [HeaderName;2] = [
     SEC_WEBSOCKET_KEY, // 16 byte
-    SEC_WEBSOCKET_PROTOCOL,
+    // SEC_WEBSOCKET_PROTOCOL, if not present we will choose default
     SEC_WEBSOCKET_VERSION,
-    SEC_WEBSOCKET_VERSION
 ];
 static WEBSOCKET_VERSION_SUPPORTED: &str = "13";
-static HEADER_REQUIRED_MAP : [(HeaderName,&str);5] = [
-    (ORIGIN,"cluster23.com"),
-    (HOST,"server.cluster23.com"),
+static HEADER_REQUIRED_MAP : [(HeaderName,&str);4] = [
+    // (ORIGIN,"cluster23.com"),
+    (HOST,"localhost:1234"),
     (CONNECTION,"Upgrade"),
     (UPGRADE,"websocket"),
     (SEC_WEBSOCKET_VERSION,WEBSOCKET_VERSION_SUPPORTED)
@@ -67,7 +66,7 @@ pub fn get_http_response_bytes(response: &mut Response<()>) -> Result<Vec<u8>,&'
     let colon_bytes = colon.as_bytes();
     let http_version: &str = "1.1";
 
-    let status_code_line = format!("HTTP/{} {}",http_version, response.status().as_str());
+    let status_code_line = format!("HTTP/{} {} {}",http_version, response.status().as_str(),response.status().canonical_reason().unwrap());
     let status_code_line_bytes = status_code_line.as_bytes();
     buffer.append_u8_array(&status_code_line_bytes)?;
     buffer.append_u8_array(crfl_bytes)?;
@@ -82,12 +81,17 @@ pub fn get_http_response_bytes(response: &mut Response<()>) -> Result<Vec<u8>,&'
         buffer.append_u8_array(header_value_bytes)?;
         buffer.append_u8_array(crfl_bytes)?;
     }
+    buffer.append_u8_array(crfl_bytes)?;
     let arr_final = buffer.get_arr();
     Ok(arr_final)
 }
 
 fn select_sub_protocol(header_map: &HeaderMap) -> Result<&str,&'static str> {
-    let protocols_header = header_map.get(SEC_WEBSOCKET_PROTOCOL).unwrap();
+    // if header not present select the one available
+    let protocols_header = match  header_map.get(SEC_WEBSOCKET_PROTOCOL) {
+        None => { return Ok(SUB_PROTOCOLS_SUPPORTED[0])}
+        Some(val) => val
+    };
     let protocols_requested = protocols_header.to_str().unwrap().split(",");
     let mut protocol_matched: &str = "";
     for protocol_str in protocols_requested {
@@ -148,12 +152,16 @@ pub fn can_be_upgraded_to_websocket(request: &Request<()> ) -> bool {
     }
 
     crate::info!("Checking Websocket Sub protocol");
-    match select_sub_protocol(header_map) {
-        Err(_) => {
-            crate::error!("Sub Protocol not supported ");
-            return false
+    if request.headers().contains_key(SEC_WEBSOCKET_PROTOCOL) {
+        match select_sub_protocol(header_map) {
+            Err(_) => {
+                crate::error!("Sub Protocol not supported ");
+                return false
+            }
+            _ => {}
         }
-        _ => {}
+    } else {
+        crate::info!("No sub-protocol Requested");
     }
 
     crate::info!("Checking HTTP headers");
@@ -188,16 +196,17 @@ pub fn create_websocket_response<'a>(request: &'a Request<()>) -> Result<Respons
     }
 
     let concat_key = format!("{}{}", sec_ws_key, GUID);
+    let concat_key_u8 = concat_key.as_bytes();
     crate::info!("concat_key: {}",concat_key);
 
-    let mut sha1_hasher = crypto::sha1::Sha1::new();
-    sha1_hasher.input_str(sec_ws_key);
-    let mut encoded_arr = [1;20];
-    sha1_hasher.result(&mut encoded_arr);
+    let mut hasher = Sha1::new();
+    hasher.update(concat_key_u8);
+    let mut encoded_arr = hasher.finalize();
     crate::info!("Sha1 hash: {:?}",encoded_arr);
-    crate::info!("base64 hash: {}",base64::encode(encoded_arr));
 
     let encoded_sha1 = base64::encode(encoded_arr);
+    crate::info!("base64 hash: {}",encoded_sha1);
+
 
     // any status code other than 101 indicates that the WebSocket handshake
     //    has not completed and that the semantics of HTTP still apply
@@ -217,10 +226,14 @@ pub fn create_websocket_response<'a>(request: &'a Request<()>) -> Result<Respons
     response_builder = response_builder.status(StatusCode::SWITCHING_PROTOCOLS)
         .header(UPGRADE,HeaderValue::from_static("websocket"))
         .header(CONNECTION,HeaderValue::from_static("upgrade"))
-        .header(SEC_WEBSOCKET_ACCEPT,HeaderValue::from_str(&*base64::encode(encoded_sha1.as_bytes())).unwrap())
-        .header(SEC_WEBSOCKET_PROTOCOL,HeaderValue::from_str(select_sub_protocol(request.headers()).unwrap()).unwrap())
+        .header(SEC_WEBSOCKET_ACCEPT,HeaderValue::from_str(&encoded_sha1).unwrap())
         .header(SERVER,HeaderValue::from_static(SERVER_NAME))
         .header(DATE,fmt_http_date(SystemTime::now()));
+
+    //if a sub prototcol is requested
+    if request.headers().contains_key(SEC_WEBSOCKET_PROTOCOL) {
+        response_builder = response_builder.header(SEC_WEBSOCKET_PROTOCOL,HeaderValue::from_str(select_sub_protocol(request.headers()).unwrap()).unwrap())
+    }
 
     // The server can also set cookie-related option fields to _set_
     //    cookies, as described in [RFC6265].
@@ -236,7 +249,7 @@ pub fn create_401_response() -> Response<()>{
 }
 
 pub async fn read_bytes_from_socket(read_half: &mut OwnedReadHalf) -> Result<Vec<u8>, std::io::Error> {
-    let mut bytes_data = vec![0;1024];
+    let mut bytes_data = vec![0;4096];
     let mut ptr: usize = 0;
     let mut data_size = 0;
     loop {
@@ -265,10 +278,22 @@ pub async fn read_bytes_from_socket(read_half: &mut OwnedReadHalf) -> Result<Vec
     Ok(bytes_data[..data_size].to_owned())
 }
 
+pub async fn read_specified_bytes_from_socket(read_half: &mut OwnedReadHalf, bytes_to_read: usize) -> Result<Vec<u8>, &'static str> {
+    let mut bytes_data = vec![0;bytes_to_read];
+    let n: usize = match read_half.read(&mut bytes_data).await {
+        Ok(n) => n,
+        Err(e) => return Err("Not able to read data")
+    };
+    if n != bytes_to_read {
+        return Err("Not able to read complete data");
+    }
+    Ok(bytes_data)
+}
+
 pub fn parse_http_request_bytes(bytes: &[u8]) -> Result<Request<()>,&'static str> {
     crate::info!("Parsing HTTP request");
 
-    let mut headers = [EMPTY_HEADER;10];
+    let mut headers = [EMPTY_HEADER;30];
     let mut http_parser_req = httparse::Request::new(&mut headers);
     match http_parser_req.parse(bytes) {
         Ok(status) => {
