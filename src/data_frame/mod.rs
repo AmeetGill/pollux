@@ -15,7 +15,7 @@ static OPCODE_BITMASK: u8 = 0b00001111;
 static WEBSOCKET_MASK_BITMASK: u8 = 0b10000000;
 static INITIAL_PAYLOAD_LENGTH_MASK: u8 = 0b01111111;
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone,Debug)]
 pub enum Opcode {
     ContinuationFrame,
     TextFrame,
@@ -35,13 +35,13 @@ static OPCODES_ARRAY: [(u8,Opcode);6] = [
     (0b00001010,Opcode::Pong) // denotes a pong
 ];
 
-
+#[derive(Debug)]
 pub struct DataFrameInfo {
     pub mask_key: [u8;4],
     pub contain_masked_data: bool,
     pub total_bytes_to_read: usize,
     pub opcode: Opcode,
-    pub final_frame: bool,
+    pub is_this_final_frame: bool,
 }
 
 // only supported on 64bit server
@@ -63,11 +63,11 @@ pub async fn read_next_websocket_dataframe(read_half: &mut OwnedReadHalf) -> Dat
         mask_key: [0;4],
         total_bytes_to_read: 0,
         opcode: Opcode::NoOpcodeFound,
-        final_frame: false,
+        is_this_final_frame: false,
         contain_masked_data: false,
     };
     let first_byte = read_half.read_u8().await.unwrap();
-    data_frame_info.final_frame = first_byte & FIN_BITMASK != 0;
+    data_frame_info.is_this_final_frame = first_byte & FIN_BITMASK != 0;
 
     // skip rsv flags 3 bits
     let opcode = OPCODE_BITMASK & first_byte;
@@ -122,35 +122,33 @@ fn get_payload_length_bits(data_len: usize, mut masked_bit: u8) -> Vec<u8> {
         if data_len <= u16::MAX as usize {
             masked_bit |= 126;
             vec.push(masked_bit);
-            vec.push(data_len as u8 );
             vec.push((data_len >> 8) as u8 );
+            vec.push(data_len as u8 );
         } else {
             masked_bit |= 127;
             vec.push(masked_bit);
-            vec.push(data_len as u8 );
-            vec.push((data_len >> 8) as u8 );
-            vec.push((data_len >> 16) as u8 );
-            vec.push((data_len >> 24) as u8 );
-            vec.push((data_len >> 32) as u8 );
-            vec.push((data_len >> 40) as u8 );
-            vec.push((data_len >> 48) as u8 );
             vec.push((data_len >> 56) as u8 );
+            vec.push((data_len >> 48) as u8 );
+            vec.push((data_len >> 40) as u8 );
+            vec.push((data_len >> 32) as u8 );
+            vec.push((data_len >> 24) as u8 );
+            vec.push((data_len >> 16) as u8 );
+            vec.push((data_len >> 8) as u8 );
+            vec.push(data_len as u8 );
         }
     }
     vec
 }
 
-pub fn create_pong_frame(data: &[u8]) -> Vec<u8> {
+pub fn create_pong_frame(data_len: usize) -> Vec<u8> {
     let mut pong_frame = Buffer::new_unbound();
     let pong_opcode: u8 = 0b00001010;
     pong_frame.append_byte(0b10000000 | pong_opcode);
     let mut masked_bit: u8 = 0;
 
     pong_frame.append_vec8_array(
-        &get_payload_length_bits(data.len(),masked_bit)
+        &get_payload_length_bits(data_len,masked_bit)
     );
-
-    pong_frame.append_u8_array(data);
 
     pong_frame.get_arr()
 }
@@ -166,6 +164,21 @@ pub fn create_text_frame(data: &[u8]) -> Vec<u8> {
     let mut text_frame = Buffer::new_unbound();
     let text_opcode: u8 = 0b00000001;
     text_frame.append_byte(0b10000000 | text_opcode);
+    let mut masked_bit: u8 = 0;
+
+    text_frame.append_vec8_array(
+        &get_payload_length_bits(data.len(),masked_bit)
+    );
+
+    text_frame.append_u8_array(data);
+
+    text_frame.get_arr()
+}
+
+pub fn create_text_frame_with_data(data: &[u8]) -> Vec<u8> {
+    let mut text_frame = Buffer::new_unbound();
+    let text_opcode = 0b10000001;
+    text_frame.append_byte(text_opcode);
     let mut masked_bit: u8 = 0;
 
     text_frame.append_vec8_array(

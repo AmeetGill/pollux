@@ -9,6 +9,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 
 use http::{Request, Response, StatusCode};
+use crate::data_frame::Opcode;
 
 extern crate base64;
 
@@ -61,7 +62,6 @@ async fn process(socket: TcpStream, _ip: SocketAddr)  {
     info!("Processing TcpStream: Start");
     let ( mut read_half, mut write_half) = socket.into_split();
 
-
     let bytes = http_handler::read_bytes_from_socket(&mut read_half).await.unwrap();
     println!("{}", std::str::from_utf8(&bytes).unwrap());
     let http_request: Request<()> = http_handler::parse_http_request_bytes(&bytes).unwrap();
@@ -85,28 +85,39 @@ async fn process(socket: TcpStream, _ip: SocketAddr)  {
 
     loop {
         let mut data_frame = data_frame::read_next_websocket_dataframe(&mut read_half).await;
-
-        if !data_frame.final_frame {
-            // need to handle this
+        let mut data_to_send: Option<Vec<Vec<u8>>> = None;
+        match data_frame.opcode  {
+            Opcode::TextFrame => {
+                info!("TextFrame: {:?}",data_frame);
+                let mut vec_to_send: Vec<Vec<u8>> = Vec::new();
+                let mut text_data = http_handler::read_specified_bytes_from_socket(&mut read_half, data_frame.total_bytes_to_read).await.unwrap();
+                data_frame::mask_unmask_data(&mut text_data,&data_frame.mask_key);
+                vec_to_send.push(data_frame::create_text_frame(&text_data));
+                data_to_send = Some(vec_to_send);
+            }
+            Opcode::Ping => {
+                let mut ping_data = http_handler::read_specified_bytes_from_socket(&mut read_half, data_frame.total_bytes_to_read).await.unwrap();
+                data_frame::mask_unmask_data(&mut ping_data,&data_frame.mask_key);
+                let mut vec_to_send: Vec<Vec<u8>> = Vec::new();
+                vec_to_send.push(data_frame::create_pong_frame(ping_data.len()));
+                vec_to_send.push(ping_data);
+                data_to_send = Some(vec_to_send);
+            }
+            Opcode::ConnectionClose => {
+                info!("Close Connection Opcode received");
+                break;
+            }
+            _ => {
+                error!("Opcode not supported");
+                break;
+            }
         }
-
-        let mut data_bytes = http_handler::read_specified_bytes_from_socket(&mut read_half,data_frame.total_bytes_to_read).await.unwrap();
-
-        info!("Message received from client: {}",
-            data_frame::parse_data_to_string(
-                &data_frame,
-                &mut data_bytes
-                )
-        );
-
-
-        if bytes.len() <= 0 {
-            info!("No data received from client, closing connection");
-            break;
+        if data_to_send.is_some() {
+            for vec_data in data_to_send.unwrap() {
+                info!("Writing data in socket: {} bytes initial: {:?} ",vec_data.len(),&vec_data[..4]);
+                write_half.write(&vec_data).await;
+            }
         }
-        let mut bytesss = "hell bro 😂".as_bytes().to_vec();
-        let bytes_to_write = data_frame::create_text_frame(&bytesss);
-        write_half.write(&bytes_to_write).await;
     }
 
     info!("Processing TcpStream: End");
