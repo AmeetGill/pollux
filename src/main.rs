@@ -92,7 +92,8 @@ async fn process(socket: TcpStream, _ip: SocketAddr)  {
                 let mut vec_to_send: Vec<Vec<u8>> = Vec::new();
                 let mut text_data = http_handler::read_specified_bytes_from_socket(&mut read_half, data_frame.total_bytes_to_read).await.unwrap();
                 data_frame::mask_unmask_data(&mut text_data,&data_frame.mask_key);
-                vec_to_send.push(data_frame::create_text_frame(&text_data));
+                vec_to_send.push(data_frame::create_text_frame_with_data_length(text_data.len()));
+                vec_to_send.push(text_data);
                 data_to_send = Some(vec_to_send);
             }
             Opcode::Ping => {
