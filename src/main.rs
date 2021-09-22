@@ -12,11 +12,15 @@ use http::{Request, Response, StatusCode};
 use crate::data_frame::Opcode;
 
 extern crate base64;
+extern crate redis;
 
 mod http_handler;
 mod error;
 mod buffer;
 mod data_frame;
+mod model;
+mod tcp_handler;
+mod redis_client;
 
 //           ws-URI = "ws:" "//" host [ ":" port ] path [ "?" query ]
 //           wss-URI = "wss:" "//" host [ ":" port ] path [ "?" query ]
@@ -45,6 +49,9 @@ async fn main() {
     // Bind the listener to the address
     let listener = TcpListener::bind("127.0.0.1:1234").await.unwrap();
 
+    let redis_connection = redis_client::get_redis_connection()
+        .expect("Redis client connection failed");
+
     loop {
         // The second item contains the IP and port of the new connection.
         info!("Waiting for Clients");
@@ -62,7 +69,7 @@ async fn process(socket: TcpStream, _ip: SocketAddr)  {
     info!("Processing TcpStream: Start");
     let ( mut read_half, mut write_half) = socket.into_split();
 
-    let bytes = http_handler::read_bytes_from_socket(&mut read_half).await.unwrap();
+    let bytes = tcp_handler::read_bytes_from_socket(&mut read_half).await.unwrap();
     println!("{}", std::str::from_utf8(&bytes).unwrap());
     let http_request: Request<()> = http_handler::parse_http_request_bytes(&bytes).unwrap();
 
@@ -90,18 +97,26 @@ async fn process(socket: TcpStream, _ip: SocketAddr)  {
             Opcode::TextFrame => {
                 info!("TextFrame: {:?}",data_frame);
                 let mut vec_to_send: Vec<Vec<u8>> = Vec::new();
-                let mut text_data = http_handler::read_specified_bytes_from_socket(&mut read_half, data_frame.total_bytes_to_read).await.unwrap();
+                let mut text_data = tcp_handler::read_specified_bytes_from_socket(&mut read_half, data_frame.total_bytes_to_read).await.unwrap();
                 data_frame::mask_unmask_data(&mut text_data,&data_frame.mask_key);
                 vec_to_send.push(data_frame::create_text_frame_with_data_length(text_data.len()));
                 vec_to_send.push(text_data);
                 data_to_send = Some(vec_to_send);
             }
             Opcode::Ping => {
-                let mut ping_data = http_handler::read_specified_bytes_from_socket(&mut read_half, data_frame.total_bytes_to_read).await.unwrap();
+                let mut ping_data = tcp_handler::read_specified_bytes_from_socket(&mut read_half, data_frame.total_bytes_to_read).await.unwrap();
                 data_frame::mask_unmask_data(&mut ping_data,&data_frame.mask_key);
                 let mut vec_to_send: Vec<Vec<u8>> = Vec::new();
                 vec_to_send.push(data_frame::create_pong_frame(ping_data.len()));
                 vec_to_send.push(ping_data);
+                data_to_send = Some(vec_to_send);
+            }
+            Opcode::BinaryFrame => {
+                let mut vec_to_send: Vec<Vec<u8>> = Vec::new();
+                let mut binary_data = tcp_handler::read_specified_bytes_from_socket(&mut read_half, data_frame.total_bytes_to_read).await.unwrap();
+                data_frame::mask_unmask_data(&mut binary_data,&data_frame.mask_key);
+                vec_to_send.push(data_frame::create_binary_frame_with_data_length(binary_data.len()));
+                vec_to_send.push(binary_data);
                 data_to_send = Some(vec_to_send);
             }
             Opcode::ConnectionClose => {
@@ -115,7 +130,6 @@ async fn process(socket: TcpStream, _ip: SocketAddr)  {
         }
         if data_to_send.is_some() {
             for vec_data in data_to_send.unwrap() {
-                info!("Writing data in socket: {} bytes initial: {:?} ",vec_data.len(),&vec_data[..4]);
                 write_half.write(&vec_data).await;
             }
         }

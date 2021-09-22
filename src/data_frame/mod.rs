@@ -188,4 +188,17 @@ pub fn create_text_frame_with_data_length(data_len: usize) -> Vec<u8> {
     text_frame.get_arr()
 }
 
+pub fn create_binary_frame_with_data_length(data_len: usize) -> Vec<u8> {
+    let mut text_frame = Buffer::new_unbound();
+    let binary_opcode = 0b10000010;
+    text_frame.append_byte(binary_opcode);
+    let mut masked_bit: u8 = 0;
+
+    text_frame.append_vec8_array(
+        &get_payload_length_bits(data_len,masked_bit)
+    );
+
+    text_frame.get_arr()
+}
+
 
