@@ -9,7 +9,11 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 
 use http::{Request, Response, StatusCode};
-use crate::data_frame::Opcode;
+use crate::data_frame::{Opcode, DataFrameInfo, ReadFrom};
+use crate::model::User;
+use tokio::sync::{mpsc, oneshot};
+use tokio::net::tcp::OwnedReadHalf;
+use tokio::sync::mpsc::Receiver;
 
 extern crate base64;
 extern crate redis;
@@ -21,6 +25,7 @@ mod data_frame;
 mod model;
 mod tcp_handler;
 mod redis_client;
+mod channel_handler;
 
 //           ws-URI = "ws:" "//" host [ ":" port ] path [ "?" query ]
 //           wss-URI = "wss:" "//" host [ ":" port ] path [ "?" query ]
@@ -49,14 +54,15 @@ async fn main() {
     // Bind the listener to the address
     let listener = TcpListener::bind("127.0.0.1:1234").await.unwrap();
 
-    let redis_connection = redis_client::get_redis_connection()
-        .expect("Redis client connection failed");
+    // let redis_connection = redis_client::get_redis_connection()
+    //     .expect("Redis client connection failed");
 
     loop {
         // The second item contains the IP and port of the new connection.
         info!("Waiting for Clients");
         let (socket, socket_address) = listener.accept().await.unwrap();
         info!("Client connected : {:?}", socket_address);
+
         tokio::spawn(async move{
             process(socket, socket_address).await;
         });
@@ -90,22 +96,42 @@ async fn process(socket: TcpStream, _ip: SocketAddr)  {
         return;
     }
 
+    let (tx, mut rx) = mpsc::channel(100);
+    let tx1 = tx.clone();
+
     loop {
-        let mut data_frame = data_frame::read_next_websocket_dataframe(&mut read_half).await;
-        let mut data_to_send: Option<Vec<Vec<u8>>> = None;
-        match data_frame.opcode  {
+
+        let mut data_frame = DataFrameInfo{
+            mask_key: [0;4],
+            contain_masked_data: false,
+            total_bytes_to_read: 0,
+            opcode: Opcode::NoOpcodeFound,
+            is_this_final_frame: false,
+            read_from_socket: ReadFrom::Socket
+        };
+        tokio::select! {
+            val = data_frame::read_next_websocket_dataframe(&mut read_half) => {
+                data_frame = val;
+            }
+            val = data_frame::read_dataframe_from_rx(&mut rx) => {
+                data_frame = val;
+            }
+        };
+        let mut data_to_send: Option<Vec<Vec<u8>>> =  None;
+
+        match data_frame.opcode {
             Opcode::TextFrame => {
                 info!("TextFrame: {:?}",data_frame);
                 let mut vec_to_send: Vec<Vec<u8>> = Vec::new();
-                let mut text_data = tcp_handler::read_specified_bytes_from_socket(&mut read_half, data_frame.total_bytes_to_read).await.unwrap();
-                data_frame::mask_unmask_data(&mut text_data,&data_frame.mask_key);
+                let mut text_data = read_data(&data_frame,&mut rx,&mut read_half).await;
+                data_frame::mask_unmask_data(&mut text_data, &data_frame.mask_key);
                 vec_to_send.push(data_frame::create_text_frame_with_data_length(text_data.len()));
                 vec_to_send.push(text_data);
                 data_to_send = Some(vec_to_send);
             }
             Opcode::Ping => {
-                let mut ping_data = tcp_handler::read_specified_bytes_from_socket(&mut read_half, data_frame.total_bytes_to_read).await.unwrap();
-                data_frame::mask_unmask_data(&mut ping_data,&data_frame.mask_key);
+                let mut ping_data = read_data(&data_frame,&mut rx,&mut read_half).await;
+                data_frame::mask_unmask_data(&mut ping_data, &data_frame.mask_key);
                 let mut vec_to_send: Vec<Vec<u8>> = Vec::new();
                 vec_to_send.push(data_frame::create_pong_frame(ping_data.len()));
                 vec_to_send.push(ping_data);
@@ -113,8 +139,8 @@ async fn process(socket: TcpStream, _ip: SocketAddr)  {
             }
             Opcode::BinaryFrame => {
                 let mut vec_to_send: Vec<Vec<u8>> = Vec::new();
-                let mut binary_data = tcp_handler::read_specified_bytes_from_socket(&mut read_half, data_frame.total_bytes_to_read).await.unwrap();
-                data_frame::mask_unmask_data(&mut binary_data,&data_frame.mask_key);
+                let mut binary_data = read_data(&data_frame,&mut rx,&mut read_half).await;
+                data_frame::mask_unmask_data(&mut binary_data, &data_frame.mask_key);
                 vec_to_send.push(data_frame::create_binary_frame_with_data_length(binary_data.len()));
                 vec_to_send.push(binary_data);
                 data_to_send = Some(vec_to_send);
@@ -127,7 +153,8 @@ async fn process(socket: TcpStream, _ip: SocketAddr)  {
                 error!("Opcode not supported");
                 break;
             }
-        }
+        };
+
         if data_to_send.is_some() {
             for vec_data in data_to_send.unwrap() {
                 write_half.write(&vec_data).await;
@@ -137,4 +164,15 @@ async fn process(socket: TcpStream, _ip: SocketAddr)  {
 
     info!("Processing TcpStream: End");
 
+}
+
+async fn read_data(data_frame: &DataFrameInfo, rx: &mut Receiver<u8>, read_half: &mut OwnedReadHalf) -> Vec<u8>{
+    match data_frame.read_from_socket{
+        ReadFrom::Socket => {
+            tcp_handler::read_specified_bytes_from_socket(read_half, data_frame.total_bytes_to_read).await.unwrap()
+        }
+        ReadFrom::Channel => {
+            channel_handler::read_specified_bytes_from_channel(rx,data_frame.total_bytes_to_read).await.unwrap()
+        }
+    }
 }

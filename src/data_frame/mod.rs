@@ -9,6 +9,7 @@ use std::ops::Index;
 use crate::buffer::buffer::Buffer;
 use tokio::net::tcp::OwnedReadHalf;
 use tokio::io::AsyncReadExt;
+use tokio::sync::mpsc::Receiver;
 
 static FIN_BITMASK: u8 = 0b10000000;
 static OPCODE_BITMASK: u8 = 0b00001111;
@@ -24,6 +25,12 @@ pub enum Opcode {
     Ping,
     Pong,
     NoOpcodeFound
+}
+
+#[derive(Copy, Clone,Debug)]
+pub enum ReadFrom{
+    Socket,
+    Channel
 }
 
 static OPCODES_ARRAY: [(u8,Opcode);6] = [
@@ -42,6 +49,7 @@ pub struct DataFrameInfo {
     pub total_bytes_to_read: usize,
     pub opcode: Opcode,
     pub is_this_final_frame: bool,
+    pub read_from_socket: ReadFrom
 }
 
 // only supported on 64bit server
@@ -65,6 +73,7 @@ pub async fn read_next_websocket_dataframe(read_half: &mut OwnedReadHalf) -> Dat
         opcode: Opcode::NoOpcodeFound,
         is_this_final_frame: false,
         contain_masked_data: false,
+        read_from_socket: ReadFrom::Socket
     };
     let first_byte = read_half.read_u8().await.unwrap();
     data_frame_info.is_this_final_frame = first_byte & FIN_BITMASK != 0;
@@ -97,6 +106,63 @@ pub async fn read_next_websocket_dataframe(read_half: &mut OwnedReadHalf) -> Dat
         mask_key[1] = read_half.read_u8().await.unwrap();
         mask_key[2] = read_half.read_u8().await.unwrap();
         mask_key[3] = read_half.read_u8().await.unwrap();
+        data_frame_info.mask_key = mask_key.clone();
+        data_frame_info.contain_masked_data = true;
+    }
+
+    data_frame_info
+}
+
+pub async fn read_dataframe_from_rx(rx: &mut Receiver<u8>) -> DataFrameInfo {
+    let mut data_frame_info = DataFrameInfo {
+        mask_key: [0;4],
+        total_bytes_to_read: 0,
+        opcode: Opcode::NoOpcodeFound,
+        is_this_final_frame: false,
+        contain_masked_data: false,
+        read_from_socket: ReadFrom::Channel
+    };
+    let first_byte = match rx.recv().await {
+        None => { return data_frame_info}
+        Some(vale) => vale
+    };
+    data_frame_info.is_this_final_frame = first_byte & FIN_BITMASK != 0;
+
+    // skip rsv flags 3 bits
+    let opcode = OPCODE_BITMASK & first_byte;
+    data_frame_info.opcode = parse_opcode(opcode);
+    let second_byte = rx.recv().await.unwrap();
+    let websocket_mask_set = WEBSOCKET_MASK_BITMASK & second_byte != 0;
+    let mut payload_length: usize = 0;
+    let payload_length_field = INITIAL_PAYLOAD_LENGTH_MASK & second_byte;
+
+    if payload_length_field <= 125 {
+        payload_length = payload_length_field as usize;
+    }
+
+    if payload_length_field == 126 {
+        payload_length |= (rx.recv().await.unwrap() as usize) << 8;
+        payload_length |= rx.recv().await.unwrap() as usize;
+    }
+    if payload_length_field == 127 {
+        payload_length |= (rx.recv().await.unwrap() as usize) << 56;
+        payload_length |= (rx.recv().await.unwrap() as usize) << 48;
+        payload_length |= (rx.recv().await.unwrap() as usize) << 40;
+        payload_length |= (rx.recv().await.unwrap() as usize) << 32;
+        payload_length |= (rx.recv().await.unwrap() as usize) << 24;
+        payload_length |= (rx.recv().await.unwrap() as usize) << 16;
+        payload_length |= (rx.recv().await.unwrap() as usize) << 8;
+        payload_length |= (rx.recv().await.unwrap() as usize)
+    }
+
+    data_frame_info.total_bytes_to_read = payload_length;
+
+    let mut mask_key:[u8;4] = [0;4];
+    if websocket_mask_set {
+        mask_key[0] = rx.recv().await.unwrap();
+        mask_key[1] = rx.recv().await.unwrap();
+        mask_key[2] = rx.recv().await.unwrap();
+        mask_key[3] = rx.recv().await.unwrap();
         data_frame_info.mask_key = mask_key.clone();
         data_frame_info.contain_masked_data = true;
     }

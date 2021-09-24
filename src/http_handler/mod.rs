@@ -42,7 +42,7 @@ static GET_METHOD: &str = "GET";
 static WEBSOCKET_HEADERS_REQUIRED: [HeaderName;2] = [
     SEC_WEBSOCKET_KEY, // 16 byte
     // SEC_WEBSOCKET_PROTOCOL, if not present we will choose default
-    SEC_WEBSOCKET_VERSION,
+    SEC_WEBSOCKET_VERSION
 ];
 static WEBSOCKET_VERSION_SUPPORTED: &str = "13";
 static HEADER_REQUIRED_MAP : [(HeaderName,&str);4] = [
@@ -173,6 +173,14 @@ pub fn can_be_upgraded_to_websocket(request: &Request<()> ) -> bool {
             return false;
         }
     }
+
+    let user_id_header: HeaderName = HeaderName::from_static("user-id");
+    crate::info!("Checking User Id Header: {}",user_id_header);
+    if !request.headers().contains_key(user_id_header) {
+        crate::error!("No User-id Header found");
+        return false;
+    }
+
 
     true
 }
