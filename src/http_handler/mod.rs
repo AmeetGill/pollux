@@ -55,7 +55,7 @@ static HEADER_REQUIRED_MAP : [(HeaderName,&str);4] = [
 
 static GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-pub fn get_http_response_bytes(response: &mut Response<()>) -> Result<Vec<u8>,&'static str> {
+pub fn get_http_response_bytes(response: Response<()>) -> Result<Vec<u8>,&'static str> {
 
     let mut buffer: Box<Buffer<u8>> = crate::buffer::buffer::Buffer::new_unbound();
     let header_map = response.headers();
@@ -185,9 +185,9 @@ pub fn can_be_upgraded_to_websocket(request: &Request<()> ) -> bool {
     true
 }
 
-pub fn create_websocket_response<'a>(request: &'a Request<()>) -> Result<Response<()>,&'static str> {
+pub fn create_websocket_response(request: Request<()>) -> Result<(Response<()>,u32),&'static str> {
     crate::info!("Creating Websocket handshake response");
-    if !can_be_upgraded_to_websocket(request) {
+    if !can_be_upgraded_to_websocket(&request) {
         crate::error!("Request not appropriate to make Handshake unsuccessful");
         return Err("Cannot be upgraded to websockets");
     }
@@ -243,9 +243,16 @@ pub fn create_websocket_response<'a>(request: &'a Request<()>) -> Result<Respons
         response_builder = response_builder.header(SEC_WEBSOCKET_PROTOCOL,HeaderValue::from_str(select_sub_protocol(request.headers()).unwrap()).unwrap())
     }
 
+    let user_id = request.headers().get(HeaderName::from_static("user-id"))
+        .unwrap()
+        .to_str().unwrap()
+        .to_string()
+        .parse::<u32>()
+        .unwrap();
+
     // The server can also set cookie-related option fields to _set_
     //    cookies, as described in [RFC6265].
-    Ok(response_builder.body(()).unwrap())
+    Ok((response_builder.body(()).unwrap(),user_id))
 }
 
 pub fn create_401_response() -> Response<()>{
@@ -257,12 +264,12 @@ pub fn create_401_response() -> Response<()>{
 }
 
 
-pub fn parse_http_request_bytes(bytes: &[u8]) -> Result<Request<()>,&'static str> {
+pub fn parse_http_request_bytes(bytes: Vec<u8>) -> Result<Request<()>,&'static str> {
     crate::info!("Parsing HTTP request");
 
     let mut headers = [EMPTY_HEADER;30];
     let mut http_parser_req = httparse::Request::new(&mut headers);
-    match http_parser_req.parse(bytes) {
+    match http_parser_req.parse(&bytes) {
         Ok(status) => {
             match status {
                 Status::Complete(headers) => {

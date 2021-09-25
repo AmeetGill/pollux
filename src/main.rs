@@ -10,11 +10,18 @@ use tokio::net::{TcpListener, TcpStream};
 
 use http::{Request, Response, StatusCode};
 use crate::data_frame::{Opcode, DataFrameInfo, ReadFrom};
-use crate::model::User;
-use tokio::sync::{mpsc, oneshot};
+use crate::model::{User, Message};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::net::tcp::OwnedReadHalf;
 use tokio::sync::mpsc::Receiver;
+use std::collections::HashMap;
+use tokio::sync::mpsc::Sender;
+use http::header::HeaderName;
+use redis::{Connection,RedisResult};
+use std::future::Future;
 
+#[macro_use]
+extern crate lazy_static;
 extern crate base64;
 extern crate redis;
 
@@ -37,6 +44,16 @@ mod channel_handler;
 //            The port component is OPTIONAL; the default for "ws" is port 80,
 //           while the default for "wss" is port 443.
 
+lazy_static! {
+    static ref USER_ID_MAPPING: Mutex<HashMap<u32,Sender<u8>>> = {
+        let mut m = Mutex::new(HashMap::new());
+        m
+    };
+    static ref REDIS_CONNECTION: Mutex<Option<Connection>> = {
+        Mutex::new(None)
+    };
+}
+
 #[tokio::main]
 async fn main() {
 
@@ -54,8 +71,14 @@ async fn main() {
     // Bind the listener to the address
     let listener = TcpListener::bind("127.0.0.1:1234").await.unwrap();
 
-    // let redis_connection = redis_client::get_redis_connection()
-    //     .expect("Redis client connection failed");
+    match redis_client::initialize_redis_connection().await {
+        Ok(connection) => {
+            REDIS_CONNECTION.lock().await.insert(connection);
+        }
+        Err(_) => {
+            panic!("Not able to connect to redis");
+        }
+    }
 
     loop {
         // The second item contains the IP and port of the new connection.
@@ -71,24 +94,27 @@ async fn main() {
 // The server MUST close the connection upon receiving a
 //    frame that is not masked. In this case, a server MAY send a Close
 //    frame with a status code of 1002 (protocol error)
-async fn process(socket: TcpStream, _ip: SocketAddr)  {
+async fn process(socket: TcpStream, _ip: SocketAddr )  {
     info!("Processing TcpStream: Start");
     let ( mut read_half, mut write_half) = socket.into_split();
 
     let bytes = tcp_handler::read_bytes_from_socket(&mut read_half).await.unwrap();
     println!("{}", std::str::from_utf8(&bytes).unwrap());
-    let http_request: Request<()> = http_handler::parse_http_request_bytes(&bytes).unwrap();
+    let http_request: Request<()> = http_handler::parse_http_request_bytes(bytes).unwrap();
 
     // handshake
-    let mut http_resp = http_handler::create_websocket_response(&http_request).unwrap_or_else(|_error| {
-        return http_handler::create_401_response();
+    let (mut http_resp,user_id) = http_handler::create_websocket_response(http_request).unwrap_or_else(|_error| {
+        return (http_handler::create_401_response(),0);
     });
     let http_response_status = http_resp.status().clone();
 
-    let http_resp_bytes = http_handler::get_http_response_bytes(&mut http_resp);
+    let http_resp_bytes = http_handler::get_http_response_bytes(http_resp);
     match write_half.write(&*http_resp_bytes.unwrap()).await {
         Ok(n) => info!("Data sent size: {}",n),
-        Err(e) => error!("Enable to send Data : {}",e)
+        Err(e) => {
+            error!("Enable to send Data : {}",e);
+            return;
+        }
     };
 
     if http_response_status != StatusCode::SWITCHING_PROTOCOLS{
@@ -97,7 +123,8 @@ async fn process(socket: TcpStream, _ip: SocketAddr)  {
     }
 
     let (tx, mut rx) = mpsc::channel(100);
-    let tx1 = tx.clone();
+
+    USER_ID_MAPPING.lock().await.insert(user_id,tx.clone());
 
     loop {
 
@@ -107,7 +134,8 @@ async fn process(socket: TcpStream, _ip: SocketAddr)  {
             total_bytes_to_read: 0,
             opcode: Opcode::NoOpcodeFound,
             is_this_final_frame: false,
-            read_from_socket: ReadFrom::Socket
+            read_from_socket: ReadFrom::Socket,
+            raw_bytes: Vec::new()
         };
         tokio::select! {
             val = data_frame::read_next_websocket_dataframe(&mut read_half) => {
@@ -117,17 +145,26 @@ async fn process(socket: TcpStream, _ip: SocketAddr)  {
                 data_frame = val;
             }
         };
-        let mut data_to_send: Option<Vec<Vec<u8>>> =  None;
+
+        let mut vec_to_send: Vec<Vec<u8>> = Vec::new();
 
         match data_frame.opcode {
             Opcode::TextFrame => {
                 info!("TextFrame: {:?}",data_frame);
-                let mut vec_to_send: Vec<Vec<u8>> = Vec::new();
                 let mut text_data = read_data(&data_frame,&mut rx,&mut read_half).await;
-                data_frame::mask_unmask_data(&mut text_data, &data_frame.mask_key);
-                vec_to_send.push(data_frame::create_text_frame_with_data_length(text_data.len()));
-                vec_to_send.push(text_data);
-                data_to_send = Some(vec_to_send);
+                match data_frame.read_from_socket {
+                    ReadFrom::Socket => {
+                        data_frame::mask_unmask_data(&mut text_data, &data_frame.mask_key);
+                        vec_to_send.push(data_frame::create_text_frame_with_data_length(text_data.len()));
+                        vec_to_send.push(text_data);
+                    }
+                    ReadFrom::Channel => {
+                        info!("message received from Channel");
+                        vec_to_send.push(data_frame.raw_bytes);
+                        vec_to_send.push(text_data);
+                    }
+                }
+
             }
             Opcode::Ping => {
                 let mut ping_data = read_data(&data_frame,&mut rx,&mut read_half).await;
@@ -135,15 +172,22 @@ async fn process(socket: TcpStream, _ip: SocketAddr)  {
                 let mut vec_to_send: Vec<Vec<u8>> = Vec::new();
                 vec_to_send.push(data_frame::create_pong_frame(ping_data.len()));
                 vec_to_send.push(ping_data);
-                data_to_send = Some(vec_to_send);
             }
             Opcode::BinaryFrame => {
                 let mut vec_to_send: Vec<Vec<u8>> = Vec::new();
                 let mut binary_data = read_data(&data_frame,&mut rx,&mut read_half).await;
-                data_frame::mask_unmask_data(&mut binary_data, &data_frame.mask_key);
-                vec_to_send.push(data_frame::create_binary_frame_with_data_length(binary_data.len()));
-                vec_to_send.push(binary_data);
-                data_to_send = Some(vec_to_send);
+                match data_frame.read_from_socket {
+                    ReadFrom::Socket => {
+                        data_frame::mask_unmask_data(&mut binary_data, &data_frame.mask_key);
+                        vec_to_send.push(data_frame::create_binary_frame_with_data_length(binary_data.len()));
+                        vec_to_send.push(binary_data);
+                    }
+                    ReadFrom::Channel => {
+                        info!("message received from Channel");
+                        vec_to_send.push(data_frame.raw_bytes);
+                        vec_to_send.push(binary_data);
+                    }
+                }
             }
             Opcode::ConnectionClose => {
                 info!("Close Connection Opcode received");
@@ -155,12 +199,44 @@ async fn process(socket: TcpStream, _ip: SocketAddr)  {
             }
         };
 
-        if data_to_send.is_some() {
-            for vec_data in data_to_send.unwrap() {
-                write_half.write(&vec_data).await;
+        let message: Message = serde_json::from_str(std::str::from_utf8( vec_to_send.get(1).unwrap()).unwrap()).unwrap();
+
+        match data_frame.read_from_socket {
+            ReadFrom::Socket => {
+                match data_frame.opcode {
+                    Opcode::Ping => {
+                        for vec_data in vec_to_send {
+                            write_half.write(&vec_data).await;
+                        }
+                    }
+                    _ => {
+                        match USER_ID_MAPPING.lock().await.get(&message.sender_user_id) {
+                            None => {
+                                let connection = REDIS_CONNECTION.lock().await.as_mut().unwrap();
+                                // add logic here
+                            }
+                            Some(tx2) => {
+                                let tx2 = tx2.clone();
+                                for bytes in vec_to_send {
+                                    for byte in bytes {
+                                        tx2.send(byte).await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ReadFrom::Channel => {
+                for vec_data in vec_to_send {
+                    write_half.write(&vec_data).await;
+                }
             }
         }
     }
+
+    info!("Removing entry from hashMap: End");
+    USER_ID_MAPPING.lock().await.remove(&user_id);
 
     info!("Processing TcpStream: End");
 

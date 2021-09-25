@@ -49,7 +49,8 @@ pub struct DataFrameInfo {
     pub total_bytes_to_read: usize,
     pub opcode: Opcode,
     pub is_this_final_frame: bool,
-    pub read_from_socket: ReadFrom
+    pub read_from_socket: ReadFrom,
+    pub raw_bytes: Vec<u8>
 }
 
 // only supported on 64bit server
@@ -73,7 +74,8 @@ pub async fn read_next_websocket_dataframe(read_half: &mut OwnedReadHalf) -> Dat
         opcode: Opcode::NoOpcodeFound,
         is_this_final_frame: false,
         contain_masked_data: false,
-        read_from_socket: ReadFrom::Socket
+        read_from_socket: ReadFrom::Socket,
+        raw_bytes: Vec::new()
     };
     let first_byte = read_half.read_u8().await.unwrap();
     data_frame_info.is_this_final_frame = first_byte & FIN_BITMASK != 0;
@@ -120,18 +122,23 @@ pub async fn read_dataframe_from_rx(rx: &mut Receiver<u8>) -> DataFrameInfo {
         opcode: Opcode::NoOpcodeFound,
         is_this_final_frame: false,
         contain_masked_data: false,
-        read_from_socket: ReadFrom::Channel
+        read_from_socket: ReadFrom::Channel,
+        raw_bytes: Vec::new()
     };
     let first_byte = match rx.recv().await {
         None => { return data_frame_info}
         Some(vale) => vale
     };
+    crate::info!("Reading data from RX");
     data_frame_info.is_this_final_frame = first_byte & FIN_BITMASK != 0;
+    data_frame_info.raw_bytes.push(first_byte);
 
     // skip rsv flags 3 bits
     let opcode = OPCODE_BITMASK & first_byte;
     data_frame_info.opcode = parse_opcode(opcode);
     let second_byte = rx.recv().await.unwrap();
+    data_frame_info.raw_bytes.push(second_byte);
+
     let websocket_mask_set = WEBSOCKET_MASK_BITMASK & second_byte != 0;
     let mut payload_length: usize = 0;
     let payload_length_field = INITIAL_PAYLOAD_LENGTH_MASK & second_byte;
@@ -141,18 +148,28 @@ pub async fn read_dataframe_from_rx(rx: &mut Receiver<u8>) -> DataFrameInfo {
     }
 
     if payload_length_field == 126 {
-        payload_length |= (rx.recv().await.unwrap() as usize) << 8;
-        payload_length |= rx.recv().await.unwrap() as usize;
+        data_frame_info.raw_bytes.push(rx.recv().await.unwrap());
+        data_frame_info.raw_bytes.push(rx.recv().await.unwrap());
+        payload_length |= (data_frame_info.raw_bytes[2] as usize) << 8;
+        payload_length |=  data_frame_info.raw_bytes[3] as usize;
     }
     if payload_length_field == 127 {
-        payload_length |= (rx.recv().await.unwrap() as usize) << 56;
-        payload_length |= (rx.recv().await.unwrap() as usize) << 48;
-        payload_length |= (rx.recv().await.unwrap() as usize) << 40;
-        payload_length |= (rx.recv().await.unwrap() as usize) << 32;
-        payload_length |= (rx.recv().await.unwrap() as usize) << 24;
-        payload_length |= (rx.recv().await.unwrap() as usize) << 16;
-        payload_length |= (rx.recv().await.unwrap() as usize) << 8;
-        payload_length |= (rx.recv().await.unwrap() as usize)
+        data_frame_info.raw_bytes.push(rx.recv().await.unwrap());
+        data_frame_info.raw_bytes.push(rx.recv().await.unwrap());
+        data_frame_info.raw_bytes.push(rx.recv().await.unwrap());
+        data_frame_info.raw_bytes.push(rx.recv().await.unwrap());
+        data_frame_info.raw_bytes.push(rx.recv().await.unwrap());
+        data_frame_info.raw_bytes.push(rx.recv().await.unwrap());
+        data_frame_info.raw_bytes.push(rx.recv().await.unwrap());
+        data_frame_info.raw_bytes.push(rx.recv().await.unwrap());
+        payload_length |= (data_frame_info.raw_bytes[2] as usize) << 56;
+        payload_length |= (data_frame_info.raw_bytes[3] as usize) << 48;
+        payload_length |= (data_frame_info.raw_bytes[4] as usize) << 40;
+        payload_length |= (data_frame_info.raw_bytes[5] as usize) << 32;
+        payload_length |= (data_frame_info.raw_bytes[6] as usize) << 24;
+        payload_length |= (data_frame_info.raw_bytes[7] as usize) << 16;
+        payload_length |= (data_frame_info.raw_bytes[8] as usize) << 8;
+        payload_length |= (data_frame_info.raw_bytes[9] as usize)
     }
 
     data_frame_info.total_bytes_to_read = payload_length;
@@ -163,6 +180,10 @@ pub async fn read_dataframe_from_rx(rx: &mut Receiver<u8>) -> DataFrameInfo {
         mask_key[1] = rx.recv().await.unwrap();
         mask_key[2] = rx.recv().await.unwrap();
         mask_key[3] = rx.recv().await.unwrap();
+        data_frame_info.raw_bytes.push(mask_key[0]);
+        data_frame_info.raw_bytes.push(mask_key[1]);
+        data_frame_info.raw_bytes.push(mask_key[2]);
+        data_frame_info.raw_bytes.push(mask_key[3]);
         data_frame_info.mask_key = mask_key.clone();
         data_frame_info.contain_masked_data = true;
     }
