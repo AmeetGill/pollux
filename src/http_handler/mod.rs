@@ -45,13 +45,15 @@ static WEBSOCKET_HEADERS_REQUIRED: [HeaderName;2] = [
     SEC_WEBSOCKET_VERSION
 ];
 static WEBSOCKET_VERSION_SUPPORTED: &str = "13";
-static HEADER_REQUIRED_MAP : [(HeaderName,&str);4] = [
-    // (ORIGIN,"cluster23.com"),
-    (HOST,"localhost:1234"),
-    (CONNECTION,"Upgrade"),
-    (UPGRADE,"websocket"),
-    (SEC_WEBSOCKET_VERSION,WEBSOCKET_VERSION_SUPPORTED)
-];
+lazy_static! {
+    static ref HEADER_REQUIRED_MAP : [(HeaderName,String);4] = [
+        // (ORIGIN,"cluster23.com"),
+        (HOST,crate::MY_ADDRESS.to_ascii_lowercase()),
+        (CONNECTION,"Upgrade".to_string()),
+        (UPGRADE,"websocket".to_string()),
+        (SEC_WEBSOCKET_VERSION,WEBSOCKET_VERSION_SUPPORTED.to_string())
+    ];
+}
 
 static GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -169,7 +171,7 @@ pub fn can_be_upgraded_to_websocket(request: &Request<()> ) -> bool {
         if !header_value_matching(
             header_map,
             &header_required.0,
-            header_required.1) {
+            &header_required.1) {
             return false;
         }
     }
