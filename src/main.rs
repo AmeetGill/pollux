@@ -55,7 +55,7 @@ lazy_static! {
         Mutex::new(None)
     };
     static ref MY_ADDRESS: String = {
-        format!("{}{}","0.0.0.0:",rand::random::<u16>())
+        format!("{}{}","127.0.0.1:",rand::random::<u16>())
     };
     static ref TCP_WORKER_ADDRESS: String = {
         format!("{}{}","127.0.0.1:",rand::random::<u16>())
@@ -152,7 +152,7 @@ async fn process(socket: TcpStream, _ip: SocketAddr )  {
             raw_bytes: Vec::new()
         };
         tokio::select! {
-            val = data_frame::read_next_websocket_dataframe(&mut read_half) => {
+            val = data_frame::read_next_dataframe_from_socket(&mut read_half) => {
                 data_frame = val;
             }
             val = data_frame::read_dataframe_from_rx(&mut rx) => {

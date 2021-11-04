@@ -67,7 +67,7 @@ pub fn parse_data_to_string(data_frame_info: &DataFrameInfo, data: &mut [u8]) ->
 }
 
 
-pub async fn read_next_websocket_dataframe(read_half: &mut OwnedReadHalf) -> DataFrameInfo {
+pub async fn read_next_dataframe_from_socket(read_half: &mut OwnedReadHalf) -> DataFrameInfo {
     let mut data_frame_info = DataFrameInfo {
         mask_key: [0;4],
         total_bytes_to_read: 0,

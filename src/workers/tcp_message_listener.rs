@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
 use tokio::net::TcpListener;
-use crate::data_frame::read_next_websocket_dataframe;
+use crate::data_frame::read_next_dataframe_from_socket;
 use crate::tcp_handler::read_specified_bytes_from_socket;
 use crate::model::Message;
 
@@ -12,7 +12,7 @@ pub async fn listen_for_messages_from_other_services(addr: String) {
         let (socket, _) = listener.accept().await.unwrap();
         let (mut read_half, _) = socket.into_split();
 
-        let data_frame = read_next_websocket_dataframe(&mut read_half).await;
+        let data_frame = read_next_dataframe_from_socket(&mut read_half).await;
 
         let data = read_specified_bytes_from_socket(&mut read_half,data_frame.total_bytes_to_read).await.unwrap();
 

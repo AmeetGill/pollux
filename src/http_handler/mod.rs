@@ -190,7 +190,7 @@ pub fn can_be_upgraded_to_websocket(request: &Request<()> ) -> bool {
 pub fn create_websocket_response(request: Request<()>) -> Result<(Response<()>,u32),&'static str> {
     crate::info!("Creating Websocket handshake response");
     if !can_be_upgraded_to_websocket(&request) {
-        crate::error!("Request not appropriate to make Handshake unsuccessful");
+        crate::error!("Request not appropriate to make Handshake Successful");
         return Err("Cannot be upgraded to websockets");
     }
     let mut response_builder = Response::builder();
