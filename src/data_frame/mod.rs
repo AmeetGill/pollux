@@ -5,13 +5,16 @@
 
 // read frames in to text
 
-use std::ops::Index;
+use std::io::Read;
 use crate::buffer::buffer::Buffer;
 use tokio::net::tcp::OwnedReadHalf;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, ReadBuf};
 use tokio::sync::mpsc::Receiver;
 
-static FIN_BITMASK: u8 = 0b10000000;
+static FIN_BITMASK: u8 =  0b10000000;
+static RSV1_BITMASK: u8 = 0b01000000;
+static RSV2_BITMASK: u8 = 0b00100000;
+static RSV3_BITMASK: u8 = 0b00010000;
 static OPCODE_BITMASK: u8 = 0b00001111;
 static WEBSOCKET_MASK_BITMASK: u8 = 0b10000000;
 static INITIAL_PAYLOAD_LENGTH_MASK: u8 = 0b01111111;
@@ -50,7 +53,21 @@ pub struct DataFrameInfo {
     pub opcode: Opcode,
     pub is_this_final_frame: bool,
     pub read_from: ReadFrom,
-    pub raw_bytes: Vec<u8>
+    pub raw_bytes: Vec<u8>,
+    pub payload_data: Vec<u8>
+}
+
+pub fn get_default_dataframe() -> DataFrameInfo {
+    DataFrameInfo{
+        mask_key: [0;4],
+        contain_masked_data: false,
+        total_bytes_to_read: 0,
+        opcode: Opcode::NoOpcodeFound,
+        is_this_final_frame: false,
+        read_from: ReadFrom::Socket,
+        raw_bytes: Vec::new(),
+        payload_data: Vec::new()
+    }
 }
 
 // only supported on 64bit server
@@ -66,7 +83,26 @@ pub fn parse_data_to_string(data_frame_info: &DataFrameInfo, data: &mut [u8]) ->
     str_res.to_string()
 }
 
-
+/*
+     0                   1                   2                   3
+      0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+     +-+-+-+-+-------+-+-------------+-------------------------------+
+     |F|R|R|R| opcode|M| Payload len |    Extended payload length    |
+     |I|S|S|S|  (4)  |A|     (7)     |             (16/64)           |
+     |N|V|V|V|       |S|             |   (if payload len==126/127)   |
+     | |1|2|3|       |K|             |                               |
+     +-+-+-+-+-------+-+-------------+ - - - - - - - - - - - - - - - +
+     |     Extended payload length continued, if payload len == 127  |
+     + - - - - - - - - - - - - - - - +-------------------------------+
+     |                               |Masking-key, if MASK set to 1  |
+     +-------------------------------+-------------------------------+
+     | Masking-key (continued)       |          Payload Data         |
+     +-------------------------------- - - - - - - - - - - - - - - - +
+     :                     Payload Data continued ...                :
+     + - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - +
+     |                     Payload Data continued ...                |
+     +---------------------------------------------------------------+
+ */
 pub async fn read_next_dataframe_from_socket(read_half: &mut OwnedReadHalf) -> DataFrameInfo {
     let mut data_frame_info = DataFrameInfo {
         mask_key: [0;4],
@@ -75,13 +111,21 @@ pub async fn read_next_dataframe_from_socket(read_half: &mut OwnedReadHalf) -> D
         is_this_final_frame: false,
         contain_masked_data: false,
         read_from: ReadFrom::Socket,
-        raw_bytes: Vec::new()
+        raw_bytes: Vec::new(),
+        payload_data: Vec::new()
     };
     let first_byte = read_half.read_u8().await.unwrap();
-    data_frame_info.is_this_final_frame = first_byte & FIN_BITMASK != 0;
+    data_frame_info.is_this_final_frame = ((first_byte & FIN_BITMASK) != 0);
     data_frame_info.raw_bytes.push(first_byte);
 
-    // skip rsv flags 3 bits
+    //     RSV1 bit of the WebSocket header for
+    //    PMCEs and calls the bit the "Per-Message Compressed" bit.  On a
+    //    WebSocket connection where a PMCE is in use, this bit indicates
+    //    whether a message is compressed or not.
+    let rs1_bit = RSV1_BITMASK & first_byte;
+    let rs2_bit = RSV2_BITMASK & first_byte;
+    let rs3_bit = RSV3_BITMASK & first_byte;
+
     let opcode = OPCODE_BITMASK & first_byte;
     data_frame_info.opcode = parse_opcode(opcode);
     let second_byte = read_half.read_u8().await.unwrap();
@@ -116,7 +160,7 @@ pub async fn read_next_dataframe_from_socket(read_half: &mut OwnedReadHalf) -> D
         payload_length |= (data_frame_info.raw_bytes[6] as usize) << 24;
         payload_length |= (data_frame_info.raw_bytes[7] as usize) << 16;
         payload_length |= (data_frame_info.raw_bytes[8] as usize) << 8;
-        payload_length |= (data_frame_info.raw_bytes[9] as usize)
+        payload_length |= data_frame_info.raw_bytes[9] as usize
     }
 
     data_frame_info.total_bytes_to_read = payload_length;
@@ -138,7 +182,7 @@ pub async fn read_next_dataframe_from_socket(read_half: &mut OwnedReadHalf) -> D
     data_frame_info
 }
 
-pub async fn read_dataframe_from_rx(rx: &mut Receiver<u8>) -> DataFrameInfo {
+pub async fn read_dataframe_from_rx(rx: &mut Receiver<Vec<u8>>) -> DataFrameInfo {
     let mut data_frame_info = DataFrameInfo {
         mask_key: [0;4],
         total_bytes_to_read: 0,
@@ -146,12 +190,13 @@ pub async fn read_dataframe_from_rx(rx: &mut Receiver<u8>) -> DataFrameInfo {
         is_this_final_frame: false,
         contain_masked_data: false,
         read_from: ReadFrom::Channel,
-        raw_bytes: Vec::new()
+        raw_bytes: Vec::new(),
+        payload_data: Vec::new()
     };
-    let first_byte = match rx.recv().await {
-        None => { return data_frame_info}
-        Some(vale) => vale
-    };
+    let vec_dataframe_bytes = rx.recv().await.unwrap();
+    let mut ptr:usize = 0;
+    let first_byte = vec_dataframe_bytes[ptr];
+    ptr += 1;
     crate::info!("Reading data from RX");
     data_frame_info.is_this_final_frame = first_byte & FIN_BITMASK != 0;
     data_frame_info.raw_bytes.push(first_byte);
@@ -159,7 +204,8 @@ pub async fn read_dataframe_from_rx(rx: &mut Receiver<u8>) -> DataFrameInfo {
     // skip rsv flags 3 bits
     let opcode = OPCODE_BITMASK & first_byte;
     data_frame_info.opcode = parse_opcode(opcode);
-    let second_byte = rx.recv().await.unwrap();
+    let second_byte = vec_dataframe_bytes[ptr];
+    ptr += 1;
     data_frame_info.raw_bytes.push(second_byte);
 
     let websocket_mask_set = WEBSOCKET_MASK_BITMASK & second_byte != 0;
@@ -171,20 +217,30 @@ pub async fn read_dataframe_from_rx(rx: &mut Receiver<u8>) -> DataFrameInfo {
     }
 
     if payload_length_field == 126 {
-        data_frame_info.raw_bytes.push(rx.recv().await.unwrap());
-        data_frame_info.raw_bytes.push(rx.recv().await.unwrap());
+        data_frame_info.raw_bytes.push(vec_dataframe_bytes[ptr]);
+        ptr += 1;
+        data_frame_info.raw_bytes.push(vec_dataframe_bytes[ptr]);
+        ptr += 1;
         payload_length |= (data_frame_info.raw_bytes[2] as usize) << 8;
         payload_length |=  data_frame_info.raw_bytes[3] as usize;
     }
     if payload_length_field == 127 {
-        data_frame_info.raw_bytes.push(rx.recv().await.unwrap());
-        data_frame_info.raw_bytes.push(rx.recv().await.unwrap());
-        data_frame_info.raw_bytes.push(rx.recv().await.unwrap());
-        data_frame_info.raw_bytes.push(rx.recv().await.unwrap());
-        data_frame_info.raw_bytes.push(rx.recv().await.unwrap());
-        data_frame_info.raw_bytes.push(rx.recv().await.unwrap());
-        data_frame_info.raw_bytes.push(rx.recv().await.unwrap());
-        data_frame_info.raw_bytes.push(rx.recv().await.unwrap());
+        data_frame_info.raw_bytes.push(vec_dataframe_bytes[ptr]);
+        ptr += 1;
+        data_frame_info.raw_bytes.push(vec_dataframe_bytes[ptr]);
+        ptr += 1;
+        data_frame_info.raw_bytes.push(vec_dataframe_bytes[ptr]);
+        ptr += 1;
+        data_frame_info.raw_bytes.push(vec_dataframe_bytes[ptr]);
+        ptr += 1;
+        data_frame_info.raw_bytes.push(vec_dataframe_bytes[ptr]);
+        ptr += 1;
+        data_frame_info.raw_bytes.push(vec_dataframe_bytes[ptr]);
+        ptr += 1;
+        data_frame_info.raw_bytes.push(vec_dataframe_bytes[ptr]);
+        ptr += 1;
+        data_frame_info.raw_bytes.push(vec_dataframe_bytes[ptr]);
+        ptr += 1;
         payload_length |= (data_frame_info.raw_bytes[2] as usize) << 56;
         payload_length |= (data_frame_info.raw_bytes[3] as usize) << 48;
         payload_length |= (data_frame_info.raw_bytes[4] as usize) << 40;
@@ -192,17 +248,21 @@ pub async fn read_dataframe_from_rx(rx: &mut Receiver<u8>) -> DataFrameInfo {
         payload_length |= (data_frame_info.raw_bytes[6] as usize) << 24;
         payload_length |= (data_frame_info.raw_bytes[7] as usize) << 16;
         payload_length |= (data_frame_info.raw_bytes[8] as usize) << 8;
-        payload_length |= (data_frame_info.raw_bytes[9] as usize)
+        payload_length |= data_frame_info.raw_bytes[9] as usize
     }
 
     data_frame_info.total_bytes_to_read = payload_length;
 
     let mut mask_key:[u8;4] = [0;4];
     if websocket_mask_set {
-        mask_key[0] = rx.recv().await.unwrap();
-        mask_key[1] = rx.recv().await.unwrap();
-        mask_key[2] = rx.recv().await.unwrap();
-        mask_key[3] = rx.recv().await.unwrap();
+        mask_key[0] = vec_dataframe_bytes[ptr];
+        ptr += 1;
+        mask_key[1] = vec_dataframe_bytes[ptr];
+        ptr += 1;
+        mask_key[2] = vec_dataframe_bytes[ptr];
+        ptr += 1;
+        mask_key[3] = vec_dataframe_bytes[ptr];
+        ptr += 1;
         data_frame_info.raw_bytes.push(mask_key[0]);
         data_frame_info.raw_bytes.push(mask_key[1]);
         data_frame_info.raw_bytes.push(mask_key[2]);

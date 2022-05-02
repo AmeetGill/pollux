@@ -1,5 +1,3 @@
-use tokio::net::tcp::OwnedReadHalf;
-use std::cmp::min;
 use http::{Request, Uri, Method, Version, Response, StatusCode, HeaderMap};
 use httparse::{EMPTY_HEADER, Status};
 use std::str::FromStr;
@@ -14,15 +12,13 @@ use http::header::{
     CONNECTION,
     SEC_WEBSOCKET_PROTOCOL,
     SEC_WEBSOCKET_VERSION,
-    ORIGIN,
+    SEC_WEBSOCKET_EXTENSIONS,
     HOST
 };
-use tokio::io::{AsyncReadExt};
 use httpdate::fmt_http_date;
 use std::time::SystemTime;
 use sha1::{Sha1, Digest};
 use crate::buffer::buffer::Buffer;
-use std::error::Error;
 
 static SERVER_NAME: &str = "Cluster23";
 
@@ -45,6 +41,7 @@ static WEBSOCKET_HEADERS_REQUIRED: [HeaderName;2] = [
     SEC_WEBSOCKET_VERSION
 ];
 static WEBSOCKET_VERSION_SUPPORTED: &str = "13";
+use regex::Regex;
 lazy_static! {
     static ref HEADER_REQUIRED_MAP : [(HeaderName,String);4] = [
         // (ORIGIN,"cluster23.com"),
@@ -187,7 +184,7 @@ pub fn can_be_upgraded_to_websocket(request: &Request<()> ) -> bool {
     true
 }
 
-pub fn create_websocket_response(request: Request<()>) -> Result<(Response<()>,u32),&'static str> {
+pub fn create_websocket_response(request: Request<()>) -> Result<(Response<()>,String),&'static str> {
     crate::info!("Creating Websocket handshake response");
     if !can_be_upgraded_to_websocket(&request) {
         crate::error!("Request not appropriate to make Handshake Successful");
@@ -211,7 +208,7 @@ pub fn create_websocket_response(request: Request<()>) -> Result<(Response<()>,u
 
     let mut hasher = Sha1::new();
     hasher.update(concat_key_u8);
-    let mut encoded_arr = hasher.finalize();
+    let encoded_arr = hasher.finalize();
     crate::info!("Sha1 hash: {:?}",encoded_arr);
 
     let encoded_sha1 = base64::encode(encoded_arr);
@@ -248,9 +245,13 @@ pub fn create_websocket_response(request: Request<()>) -> Result<(Response<()>,u
     let user_id = request.headers().get(HeaderName::from_static("user-id"))
         .unwrap()
         .to_str().unwrap()
-        .to_string()
-        .parse::<u32>()
-        .unwrap();
+        .to_string();
+
+    let re = Regex::new(r"^[A-Za-z\d\-_]+$").unwrap();
+    if !re.is_match(&user_id) {
+        crate::error!("User_id format is invalid");
+        return Err("User_id format is invalid");
+    }
 
     // The server can also set cookie-related option fields to _set_
     //    cookies, as described in [RFC6265].
@@ -274,7 +275,7 @@ pub fn parse_http_request_bytes(bytes: Vec<u8>) -> Result<Request<()>,&'static s
     match http_parser_req.parse(&bytes) {
         Ok(status) => {
             match status {
-                Status::Complete(headers) => {
+                Status::Complete(_headers) => {
                     crate::info!("Parsing complete");
                 }
                 Status::Partial => {

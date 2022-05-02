@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-use std::sync::mpsc::Sender;
 use tokio::net::TcpListener;
 use crate::data_frame::read_next_dataframe_from_socket;
 use crate::tcp_handler::read_specified_bytes_from_socket;
@@ -25,9 +23,7 @@ pub async fn listen_for_messages_from_other_services(addr: String) {
 
         let tx2 = user_sender.clone();
         for bytes in vec_to_send {
-            for byte in bytes {
-                tx2.send(byte).await;
-            }
+            tx2.send(bytes).await;
         }
 
     }
