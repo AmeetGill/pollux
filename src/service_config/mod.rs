@@ -9,7 +9,8 @@ pub struct ServiceConfig {
 
 #[derive(Deserialize,Serialize,Debug)]
 pub struct GlobalConfig {
-    pub config: ServiceConfig
+    pub test: ServiceConfig,
+    pub prod: ServiceConfig
 }
 
 pub fn new_config(env: String) -> ServiceConfig{
@@ -18,7 +19,12 @@ pub fn new_config(env: String) -> ServiceConfig{
 
     let json: GlobalConfig = serde_json::from_str(&data)
         .expect("JSON does not have correct format.");
-    json.config
+
+    if env == "prod" {
+        return json.prod;
+    }
+
+    json.test
 }
 
 pub fn get_default_config() -> ServiceConfig {

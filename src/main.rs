@@ -67,7 +67,7 @@ lazy_static! {
 
 #[tokio::main]
 async fn main() {
-
+    
     let stdout = ConsoleAppender::builder()
         .encoder(Box::new(PatternEncoder::new("{d(%Y-%m-%d %H:%M:%S %Z)(utc)} {h({l})} {T} [{f:1.10}:{L}] [{M}] [] {m}{n}")))
         .build();
@@ -151,19 +151,12 @@ async fn process(socket: TcpStream, _ip: SocketAddr )  {
                 data_frame = val;
             }
         }
-        info!("Reading Payload");
-        // let mut payload_data = read_data(&data_frame,&mut rx,&mut read_half).await;
-        // data_frame.payload_data = payload_data;
-        info!(" ------------------------ Message processing start! ------------------------ ");
         let (close_connection, vec_to_send) = process_frame(&data_frame, &mut rx, &mut read_half).await;
         if close_connection {
             break;
         }
-        info!("Length of vector payload {}",vec_to_send[1].len());
         let message: Message = serde_json::from_slice(&vec_to_send[1][..]).unwrap();
-        info!("User-id of receiver {}",message.sender_user_id);
         send_response_frame(&data_frame, vec_to_send, message, &mut write_half).await;
-        info!(" ---------------------------- Message processed! ---------------------------- ");
     }
 
     info!("Removing entry from hashMap");
@@ -199,47 +192,41 @@ async fn process_frame(data_frame: &DataFrameInfo,rx: &mut Receiver<Vec<u8>>, re
 
 async fn process_text_frame(data_frame: &DataFrameInfo,rx: &mut Receiver<Vec<u8>>, read_half: &mut OwnedReadHalf) -> Vec<Vec<u8>> {
     let mut vec_to_send: Vec<Vec<u8>> = Vec::new();
-
-    info!("TextFrame: {:?}",data_frame);
-    let mut text_data = read_data(&data_frame,rx,read_half).await;
+    let mut text_data = data_frame.payload_data.clone();
     match data_frame.read_from {
         ReadFrom::Socket => {
             data_frame::mask_unmask_data(&mut text_data, &data_frame.mask_key);
             vec_to_send.push(data_frame::create_text_frame_with_data_length(text_data.len()));
-            vec_to_send.push(text_data);
         }
         ReadFrom::Channel => {
             info!("message received from Channel");
             vec_to_send.push(data_frame.raw_bytes.clone());
-            vec_to_send.push(text_data);
         }
     }
+    vec_to_send.push(text_data);
     return vec_to_send
 }
 
 async fn process_binary_frame(data_frame: &DataFrameInfo,rx: &mut Receiver<Vec<u8>>, read_half: &mut OwnedReadHalf) -> Vec<Vec<u8>> {
     let mut vec_to_send: Vec<Vec<u8>> = Vec::new();
-
-    let mut binary_data = read_data(&data_frame,rx,read_half).await;
+    let mut binary_data = data_frame.payload_data.clone();
     match data_frame.read_from {
         ReadFrom::Socket => {
             data_frame::mask_unmask_data(&mut binary_data, &data_frame.mask_key);
             vec_to_send.push(data_frame::create_binary_frame_with_data_length(binary_data.len()));
-            vec_to_send.push(binary_data);
         }
         ReadFrom::Channel => {
             info!("message received from Channel");
             vec_to_send.push(data_frame.raw_bytes.clone());
-            vec_to_send.push(binary_data);
         }
     }
-
+    vec_to_send.push(binary_data);
     return vec_to_send
 }
 
 async fn process_ping_frame(data_frame: &DataFrameInfo,rx: &mut Receiver<Vec<u8>>, read_half: &mut OwnedReadHalf) -> Vec<Vec<u8>> {
     let mut vec_to_send: Vec<Vec<u8>> = Vec::new();
-    let mut ping_data = read_data(&data_frame,rx,read_half).await;
+    let mut ping_data = data_frame.payload_data.clone();
     data_frame::mask_unmask_data(&mut ping_data, &data_frame.mask_key);
     vec_to_send.push(data_frame::create_pong_frame(ping_data.len()));
     vec_to_send.push(ping_data);
@@ -296,16 +283,4 @@ async fn send_reply_arrived_to_this_user(vec_to_send: Vec<Vec<u8>>, write_half: 
         write_half.write(&vec_data).await.unwrap();
     }
     info!("Reply Sent");
-}
-
-
-async fn read_data(data_frame: &DataFrameInfo, rx: &mut Receiver<Vec<u8>>, read_half: &mut OwnedReadHalf) -> Vec<u8>{
-    match data_frame.read_from {
-        ReadFrom::Socket => {
-            tcp_handler::read_specified_bytes_from_socket(read_half, data_frame.total_bytes_to_read).await.unwrap()
-        }
-        ReadFrom::Channel => {
-            channel_handler::read_vector_from_channel(rx).await.unwrap()
-        }
-    }
 }

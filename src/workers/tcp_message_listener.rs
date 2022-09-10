@@ -12,7 +12,7 @@ pub async fn listen_for_messages_from_other_services(addr: String) {
 
         let data_frame = read_next_dataframe_from_socket(&mut read_half).await;
 
-        let data = read_specified_bytes_from_socket(&mut read_half,data_frame.total_bytes_to_read).await.unwrap();
+        let data = read_specified_bytes_from_socket(&mut read_half,data_frame.payload_length).await.unwrap();
 
         let message: Message = serde_json::from_str(std::str::from_utf8(&data).unwrap()).unwrap();
         let user_id_mapping = crate::USER_ID_MAPPING.lock().await;
