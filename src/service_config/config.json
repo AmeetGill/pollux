@@ -1,0 +1,10 @@
+{
+  "test": {
+    "cluster_mode": false,
+    "websocket_port": "3999"
+  },
+  "prod": {
+    "cluster_mode": true,
+    "websocket_port": "3999"
+  }
+}
