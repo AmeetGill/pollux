@@ -6,7 +6,7 @@
 // read frames in to text
 
 use std::io::Read;
-use crate::buffer::buffer::Buffer;
+use crate::buffer::Buffer;
 use crate::{tcp_handler, channel_handler};
 use tokio::net::tcp::OwnedReadHalf;
 use tokio::io::{AsyncReadExt, ReadBuf};

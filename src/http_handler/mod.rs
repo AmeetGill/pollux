@@ -18,7 +18,7 @@ use http::header::{
 use httpdate::fmt_http_date;
 use std::time::SystemTime;
 use sha1::{Sha1, Digest};
-use crate::buffer::buffer::Buffer;
+use crate::buffer::Buffer;
 
 static SERVER_NAME: &str = "Cluster23";
 
@@ -56,7 +56,7 @@ static GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 pub fn get_http_response_bytes(response: Response<()>) -> Result<Vec<u8>,&'static str> {
 
-    let mut buffer: Box<Buffer<u8>> = crate::buffer::buffer::Buffer::new_unbound();
+    let mut buffer: Box<Buffer<u8>> = crate::buffer::Buffer::new_unbound();
     let header_map = response.headers();
 
     let crfl = "\r\n";
